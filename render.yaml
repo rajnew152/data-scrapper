@@ -17,6 +17,8 @@ services:
         value: 3.12.10
       - key: SERPER_API_KEY
         sync: false          # entered in the Render dashboard, never committed
+      - key: MONGODB_URI
+        sync: false          # MongoDB Atlas connection string: turns on login / sign-up
       - key: APP_AUTH_TOKEN
         sync: false          # access code the web page asks for
       - key: APP_FORCE_HTTPS

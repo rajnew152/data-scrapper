@@ -24,6 +24,7 @@ jobs:
           cache-dependency-path: app/requirements.txt
       - run: pip install -r requirements.txt
       - run: python tests/test_security.py
+      - run: python tests/test_auth.py
       - run: python tests/test_isolation.py
       - run: python tests/test_concurrency.py
       - run: python tests/test_credits.py

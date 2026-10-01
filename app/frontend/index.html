@@ -336,6 +336,32 @@
     .table-wrap td:first-child { font-size: 14.5px; padding-top: 8px; }
     tbody tr:hover { background: var(--surface); }
   }
+
+  /* ---------- login / sign-up ---------- */
+  .auth { display: none; min-height: 100vh; align-items: center; justify-content: center;
+          padding: 24px 16px; }
+  body.need-login .auth { display: flex; }
+  body.need-login .wrap { display: none; }
+  .auth-card { width: 100%; max-width: 400px; background: var(--surface);
+               border: 1px solid var(--border); border-radius: var(--radius);
+               box-shadow: var(--shadow); padding: 28px 26px; }
+  .auth-card .brand { margin-bottom: 22px; }
+  .auth-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px;
+               background: var(--surface-2); border-radius: 10px; margin-bottom: 20px; }
+  .auth-tab { border: 0; background: transparent; padding: 9px; border-radius: 8px;
+              font-size: 14px; font-weight: 600; font-family: inherit; color: var(--ink-2);
+              cursor: pointer; }
+  .auth-tab.on { background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+  .auth-field { margin-bottom: 14px; }
+  .auth-err { display: none; margin: 4px 0 0; padding: 10px 12px; font-size: 13px;
+              border-radius: var(--radius-sm); background: var(--bad-soft); color: var(--bad); }
+  .auth-err.show { display: block; }
+  .auth-card .btn-primary { margin-top: 18px; }
+  .auth-hint { margin: 14px 0 0; font-size: 12px; color: var(--ink-3); text-align: center; }
+  .user-chip { display: none; }
+  .user-chip.show { display: flex; }
+  .btn-link { border: 0; background: none; padding: 0; color: var(--accent); cursor: pointer;
+              font: inherit; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -359,6 +385,37 @@
   </defs>
 </svg>
 
+<div class="auth" id="authScreen">
+  <form class="auth-card" id="authForm" novalidate>
+    <div class="brand">
+      <div class="brand-mark"><svg width="21" height="21" viewBox="0 0 24 24"><use href="#i-radar"/></svg></div>
+      <div>
+        <div class="brand-name">Business Data Collector</div>
+        <div class="brand-sub" id="authSub">Log in to your account</div>
+      </div>
+    </div>
+    <div class="auth-tabs" role="tablist">
+      <button type="button" class="auth-tab on" id="tabLogin" role="tab" aria-selected="true">Log in</button>
+      <button type="button" class="auth-tab" id="tabSignup" role="tab" aria-selected="false">Sign up</button>
+    </div>
+    <div class="auth-field" id="nameField" style="display:none">
+      <label for="authName">Name</label>
+      <input id="authName" autocomplete="name" maxlength="60">
+    </div>
+    <div class="auth-field">
+      <label for="authEmail">Email</label>
+      <input id="authEmail" type="email" autocomplete="email" maxlength="254" required>
+    </div>
+    <div class="auth-field">
+      <label for="authPassword">Password <small id="pwHint" style="display:none">(at least 8 characters)</small></label>
+      <input id="authPassword" type="password" autocomplete="current-password" maxlength="128" required>
+    </div>
+    <div class="auth-err" id="authErr" role="alert"></div>
+    <button class="btn btn-primary" id="authSubmit" type="submit">Log in</button>
+    <p class="auth-hint">Your records are private to your account.</p>
+  </form>
+</div>
+
 <div class="wrap">
   <!-- header -->
   <div class="top">
@@ -372,6 +429,8 @@
     <div class="status-dots">
       <span class="conn"><span id="connDot" class="dot"></span><span id="connText">Connecting&hellip;</span></span>
       <span class="conn"><span id="keyDot" class="dot"></span><span id="keyText">API key</span></span>
+      <span class="conn user-chip" id="userChip"><span id="userName"></span>
+        <button class="btn-link" id="logoutBtn" type="button">Log out</button></span>
       <span class="conn" id="slotsChip" style="display:none"><span id="slotsDot" class="dot on"></span><span id="slotsText"></span></span>
     </div>
   </div>
@@ -581,16 +640,35 @@ function clientId() {
     return memClientId || (memClientId = newClientId());
   }
 }
+/* Account session (when the server requires login): {token, user}. */
+function getSession() {
+  try { return JSON.parse(localStorage.getItem('bdc_session') || 'null'); } catch (e) { return null; }
+}
+function setSession(s) {
+  try {
+    if (s) localStorage.setItem('bdc_session', JSON.stringify(s));
+    else localStorage.removeItem('bdc_session');
+  } catch (e) {}
+}
 function authHeaders() {
   const t = getToken();
   const h = {'X-Client-Id': clientId()};
   if (t) h['X-Auth-Token'] = t;
+  const s = getSession();
+  if (s && s.token) h['Authorization'] = 'Bearer ' + s.token;
   return h;
 }
 async function api(path, opts, retried) {
   opts = opts || {};
   opts.headers = Object.assign({}, opts.headers || {}, authHeaders());
   const r = await fetch(API_BASE + path, opts);
+  if (r.status === 401 && r.headers.get('x-login-required')) {
+    setSession(null);
+    showAuth();
+    const e = new Error('Please log in');
+    e.login = true;
+    throw e;
+  }
   if (r.status === 401 && !retried) {
     const code = prompt('This app is protected. Enter the access code:');
     if (code) {
@@ -901,16 +979,90 @@ async function isOurBackend() {
     return j && j.status === 'ok';
   } catch (e) { return false; }
 }
+/* ---------- login / sign-up ---------- */
+let authMode = 'login';
+function setAuthMode(mode) {
+  authMode = mode;
+  const signup = mode === 'signup';
+  $('tabLogin').classList.toggle('on', !signup);
+  $('tabSignup').classList.toggle('on', signup);
+  $('tabLogin').setAttribute('aria-selected', String(!signup));
+  $('tabSignup').setAttribute('aria-selected', String(signup));
+  $('nameField').style.display = signup ? 'block' : 'none';
+  $('pwHint').style.display = signup ? 'inline' : 'none';
+  $('authPassword').autocomplete = signup ? 'new-password' : 'current-password';
+  $('authSub').textContent = signup ? 'Create your account' : 'Log in to your account';
+  $('authSubmit').textContent = signup ? 'Create account' : 'Log in';
+  $('authErr').classList.remove('show');
+}
+function showAuth() {
+  if (document.body.classList.contains('need-login')) return;
+  clearTimeout(pollTimer);
+  document.body.classList.add('need-login');
+  setTimeout(() => (authMode === 'signup' ? $('authName') : $('authEmail')).focus(), 0);
+}
+function authError(msg) {
+  $('authErr').textContent = msg;
+  $('authErr').classList.add('show');
+}
+$('tabLogin').onclick = () => setAuthMode('login');
+$('tabSignup').onclick = () => setAuthMode('signup');
+$('authForm').onsubmit = async ev => {
+  ev.preventDefault();
+  const signup = authMode === 'signup';
+  const email = $('authEmail').value.trim(), password = $('authPassword').value;
+  const name = $('authName').value.trim();
+  if (signup && !name) return authError('Enter your name.');
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return authError('Enter a valid email address.');
+  if (!password) return authError('Enter your password.');
+  if (signup && password.length < 8) return authError('Password must be at least 8 characters.');
+  $('authSubmit').disabled = true;
+  try {
+    const r = await fetch(API_BASE + (signup ? '/api/auth/signup' : '/api/auth/login'), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-Client-Id': clientId()},
+      body: JSON.stringify(signup ? {name, email, password} : {email, password}),
+    });
+    let data = {};
+    try { data = await r.json(); } catch (e) {}
+    if (!r.ok) {
+      const d = data.detail;
+      authError(typeof d === 'string' ? d
+        : 'Could not ' + (signup ? 'sign up' : 'log in') + ' - check the fields.');
+      return;
+    }
+    setSession({token: data.token, user: data.user});
+    location.reload();
+  } catch (e) {
+    authError('Cannot reach the server - try again in a moment.');
+  } finally {
+    $('authSubmit').disabled = false;
+  }
+};
+$('logoutBtn').onclick = async () => {
+  try { await api('/api/auth/logout', {method: 'POST'}); } catch (e) {}
+  setSession(null);
+  location.reload();
+};
+function showUser() {
+  const s = getSession();
+  if (!s || !s.user) return;
+  $('userName').textContent = s.user.name || s.user.email;
+  $('userChip').classList.add('show');
+}
+
 async function init() {
   try {
     cfg = await api('/api/config');
   } catch (e) {
+    if (e.login) return;          // the login screen is showing
     setConnected(false);
     if (!IS_FILE && !(await isOurBackend())) probeAppAndRedirect();
     setTimeout(init, 3000);  // retry until the backend is reachable
     return;
   }
   setConnected(true);
+  showUser();
   creditsPerQuery = cfg.defaults.credits_per_query;
   lastPerCat = Object.fromEntries(cfg.categories.map(c => [c.slug, c]));
   catKeySet = Object.keys(lastPerCat).join('|');

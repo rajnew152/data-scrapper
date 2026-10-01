@@ -47,7 +47,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from . import config, fastjson
+from . import auth, config, fastjson
 from .collector.categories import SUMMARY_FILE
 from .hub import RpcError, WorkerHub, WorkerUnavailable
 
@@ -103,6 +103,8 @@ hub = WorkerHub()
 
 MAX_BODY_BYTES = 64 * 1024
 CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
+# reachable without a session when login is required
+AUTH_OPEN = ("/api/auth/signup", "/api/auth/login")
 SAFE_FILE_RE = re.compile(r"^[\w\-. ]+\.xlsx$")
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 JSON_T = b"application/json"
@@ -404,7 +406,8 @@ async def h_health(scope, headers, client) -> Reply:
     worker = "up" if hub.up.is_set() and fresh else (
         "starting" if hub.proc is not None else "down")
     return jreply({"status": "ok", "version": config.APP_VERSION,
-                   "auth_required": bool(config.auth_token()), "worker": worker,
+                   "auth_required": bool(config.auth_token()),
+                   "login_required": auth.enabled(), "worker": worker,
                    "client_ip": scope.get("bdc", ("", ""))[1]})
 
 
@@ -567,6 +570,11 @@ class Guard:
         if self.rl.hit(f"ip|{ip}", config.RATE_LIMIT_IP_PER_MIN):
             log.warning("rate limit (per IP) exceeded: ip=%s path=%s", ip, path)
             return 429, "Too many requests, slow down", retry
+        if path in AUTH_OPEN:
+            if self.rl.hit(f"auth|{ip}", config.RATE_LIMIT_AUTH_PER_IP_PER_MIN):
+                log.warning("rate limit (login) exceeded: ip=%s", ip)
+                return 429, "Too many attempts - wait a minute and try again", retry
+            who = who or f"ip:{ip}"
         if not who:
             if path != "/api/health":
                 return 400, "Missing or invalid X-Client-Id - reload the page", ()
@@ -611,9 +619,21 @@ class Guard:
         headers = dict(scope["headers"])
         ip = client_ip(scope, headers)
         who = client_key(headers)
+        bad = None
+        if (is_api and method != "OPTIONS" and auth.enabled()
+                and path != "/api/health" and path not in AUTH_OPEN):
+            # logged-in users: the account is the identity, not the browser
+            try:
+                user = await auth.session_user(auth.bearer(headers))
+            except auth.AuthError as exc:
+                user, bad = None, (exc.status, exc.detail, ())
+            if user is not None:
+                who = auth.identity(user["id"])
+            elif bad is None:
+                bad = (401, "Please log in", ((b"x-login-required", b"1"),))
         scope["bdc"] = (who, ip)          # for the FastAPI endpoints
         if is_api and method != "OPTIONS":
-            bad = self._reject(path, headers, ip, who)
+            bad = bad or self._reject(path, headers, ip, who)
             if bad is not None:
                 await self._send(send, Reply(bad[0], fastjson.dumps({"detail": bad[1]}),
                                              headers=list(bad[2])), True, method)
@@ -690,7 +710,7 @@ app = Entry(guard, CORSMiddleware(
     guard,
     allow_origins=config.allowed_origins(),
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type", "X-Auth-Token", "X-Client-Id"],
+    allow_headers=["Content-Type", "X-Auth-Token", "X-Client-Id", "Authorization"],
     # Chrome's Private Network Access: file:// pages calling 127.0.0.1 send a
     # preflight that must be acknowledged or the request is blocked.
     allow_private_network=True,
@@ -719,6 +739,60 @@ def client_of(request: Request) -> str:
 
 def ip_of(request: Request) -> str:
     return request.scope["bdc"][1]
+
+
+class SignupRequest(BaseModel):
+    name: str = Field(max_length=auth.NAME_MAX * 2)
+    email: str = Field(max_length=254)
+    password: str = Field(max_length=auth.PASSWORD_MAX)
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(max_length=254)
+    password: str = Field(max_length=auth.PASSWORD_MAX)
+
+
+def _auth_off():
+    if not auth.enabled():
+        raise HTTPException(404, "Accounts are not enabled on this server "
+                                 "(set MONGODB_URI).")
+
+
+@api.post("/api/auth/signup")
+async def auth_signup(req: SignupRequest):
+    _auth_off()
+    try:
+        return jresponse(await auth.signup(req.name, req.email, req.password), 201)
+    except auth.AuthError as exc:
+        raise HTTPException(exc.status, exc.detail) from None
+
+
+@api.post("/api/auth/login")
+async def auth_login(req: LoginRequest):
+    _auth_off()
+    try:
+        return jresponse(await auth.login(req.email, req.password))
+    except auth.AuthError as exc:
+        raise HTTPException(exc.status, exc.detail) from None
+
+
+@api.post("/api/auth/logout")
+async def auth_logout(request: Request):
+    _auth_off()
+    try:
+        await auth.logout(auth.bearer(dict(request.scope["headers"])))
+    except auth.AuthError as exc:
+        raise HTTPException(exc.status, exc.detail) from None
+    return jresponse({"ok": True})
+
+
+@api.get("/api/auth/me")
+async def auth_me(request: Request):
+    _auth_off()
+    user = await auth.session_user(auth.bearer(dict(request.scope["headers"])))
+    if user is None:
+        raise HTTPException(401, "Please log in")
+    return jresponse({"user": user})
 
 
 class CollectRequest(BaseModel):

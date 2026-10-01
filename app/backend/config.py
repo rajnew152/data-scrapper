@@ -296,6 +296,15 @@ RATE_LIMIT_COLLECT_PER_IP_PER_MIN = _int_env("RATE_LIMIT_COLLECT_PER_IP_PER_MIN"
                                              1, 100_000)
 MAX_JOBS_PER_IP = _int_env("MAX_JOBS_PER_IP", 3, 1, 1000)
 MAX_CREDITS_PER_IP_PER_DAY = _int_env("MAX_CREDITS_PER_IP_PER_DAY", 1500, 0, 10_000_000)
+# Login / sign-up / login attempts per address per minute (password guessing).
+RATE_LIMIT_AUTH_PER_IP_PER_MIN = _int_env("RATE_LIMIT_AUTH_PER_IP_PER_MIN", 10, 1, 10_000)
+
+# ---- User accounts (backend/auth.py) ------------------------------------
+# Set MONGODB_URI to require login: users + sessions are stored in MongoDB
+# and each account gets its own records. Unset = anonymous per-browser data.
+MONGODB_URI = os.environ.get("MONGODB_URI", "").strip()
+MONGODB_DB = os.environ.get("MONGODB_DB", "").strip() or "business_data_collector"
+SESSION_DAYS = _int_env("SESSION_DAYS", 30, 1, 365)
 # Reverse proxies in front of the app that APPEND the caller's address to
 # X-Forwarded-For (Render: 1). The client IP is the entry that many places
 # from the right; everything left of it is caller-supplied and ignored.
