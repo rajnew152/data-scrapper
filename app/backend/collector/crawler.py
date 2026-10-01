@@ -138,10 +138,11 @@ class Fetcher:
         if self.timings is not None:
             self.timings.add(stage, time.perf_counter() - t0)
 
-    def fetch(self, url: str, max_bytes: int = 2_000_000) -> tuple[bytes | None, str, str]:
+    def fetch(self, url: str, max_bytes: int | None = None) -> tuple[bytes | None, str, str]:
         """Return (body or None, final URL, failure reason). Redirects are
         followed manually so every hop passes the SSRF guard."""
         current = url
+        max_bytes = max_bytes or config.PAGE_MAX_BYTES
         deadline = time.monotonic() + config.FETCH_DEADLINE
         try:
             for _ in range(MAX_REDIRECTS + 1):

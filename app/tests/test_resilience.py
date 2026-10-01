@@ -417,7 +417,7 @@ def test_serper_client_retries():
     print("serper client retry/backoff tests passed")
 
 
-def test_target(target: int, world_size: int = 9000, **fetch_kw) -> CollectionJob:
+def run_target(target: int, world_size: int = 9000, **fetch_kw) -> CollectionJob:
     state = StateStore()
     world = World(world_size)
     job = make_job(state, world, target, SimProvider(world, outage=(10, 22)),
@@ -442,7 +442,7 @@ def test_pool_jam():
     saved = config.CRAWL_WORKERS
     config.CRAWL_WORKERS = 8
     try:
-        job = test_target(500, jam_after=120, jam_count=6, jam_secs=30)
+        job = run_target(500, jam_after=120, jam_count=6, jam_secs=30)
     finally:
         config.CRAWL_WORKERS = saved
     assert job.counters["abandoned_tasks"] >= 4, job.counters["abandoned_tasks"]
@@ -582,7 +582,7 @@ def test_credits_run_out_then_topped_up():
     try:
         state = StateStore()
         world = World(9000)
-        provider = CreditLimited(world, allowance=20)
+        provider = CreditLimited(world, allowance=8)   # runs out under any search mix
         job = make_job(state, world, 300, provider, SimFetcher(world))
         mon = Monitor(job)
         mon.start()
@@ -632,9 +632,9 @@ def main():
     random.seed(7)
     try:
         test_serper_client_retries()
-        test_target(100)
+        run_target(100)
         test_pool_jam()
-        test_target(2000)
+        run_target(2000)
         test_crash_and_resume()
         test_exhaustion_is_honest()
         test_credits_run_out_then_topped_up()

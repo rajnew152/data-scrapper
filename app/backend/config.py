@@ -187,6 +187,26 @@ ANALYZE_PROCESSES = _int_env("ANALYZE_PROCESSES",
 # fetches stay fully parallel.
 ANALYZE_THREADS = _int_env("ANALYZE_THREADS", max(1, round(EFFECTIVE_CPUS)), 1, 64)
 
+# ---- Crawl work per record (small hosts are CPU-bound: every page fetched
+# and analysed costs time) ----------------------------------------------------
+# Page bytes read per fetch. Measured on 154 live pages (p50 182 KB, p90
+# 541 KB, max 2 MB): 768 KB cut 5 pages and changed no email / phone /
+# address; 512 KB lost phones on 7 of 19 cut pages.
+PAGE_MAX_BYTES = _int_env("PAGE_MAX_BYTES", 768_000 if SMALL_HOST else 2_000_000,
+                          100_000, 20_000_000)
+# 1 = search Google Places only, organic results just where Places is thin
+# (< 5 listings) and in the deep tier. A Places record needs ~1.3 page
+# analyses (phone + address come with the listing), an organic one 3-4
+# (directory pages, contact pages); live, 100 records took 263 analyses
+# with 8 organic searches vs 160 with 6. Pairing resumes for a category
+# whose Places yield is below PLACES_FIRST_MIN_YIELD records per credit.
+PLACES_FIRST = _int_env("PLACES_FIRST", 1 if SMALL_HOST else 0, 0, 1)
+PLACES_FIRST_MIN_YIELD = _float_env("PLACES_FIRST_MIN_YIELD", 2.0, 0.0, 50.0)
+# 1 = a site whose homepage has email + phone still gets up to 2 contact
+# pages crawled for a missing address (26 of 113 measured homepages).
+CONTACT_PAGES_FOR_ADDRESS = _int_env("CONTACT_PAGES_FOR_ADDRESS",
+                                     0 if SMALL_HOST else 1, 0, 1)
+
 # ---- Serper client tuning (all overridable in .env) ------------------------
 SERPER_CONCURRENCY = _int_env("SERPER_CONCURRENCY", 6, 1, 16)  # requests in flight
 SERPER_RPS = _int_env("SERPER_RPS", 8, 1, 50)          # adaptive ceiling

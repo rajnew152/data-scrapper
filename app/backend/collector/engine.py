@@ -957,9 +957,11 @@ class CollectionJob:
 
         data = self._to_extracted(res)
         source_page = final_url
-        # Homepage already has email + phone + address: stop, no more pages.
-        # Otherwise follow at most 2 contact/about links, stopping early.
-        if not (data.email and data.phone and data.address):
+        # Homepage already has email + phone (+ address, unless
+        # CONTACT_PAGES_FOR_ADDRESS is off): stop, no more pages. Otherwise
+        # follow at most 2 contact/about links, stopping early.
+        if not (data.email and data.phone
+                and (data.address or not config.CONTACT_PAGES_FOR_ADDRESS)):
             for cp in (res.get("contact_links") or [])[:2]:
                 if self.done():
                     break
@@ -1388,6 +1390,9 @@ class CollectionJob:
         """Should the next cell ALSO be searched organically (a second credit)?
         Decided on measured valid-records-per-credit per search type, which
         the planner keeps per category across runs:
+          * PLACES_FIRST (small hosts): no, while Places yields at least
+            PLACES_FIRST_MIN_YIELD records per credit - an organic record
+            costs ~3x the crawling of a Places one
           * until both types have KIND_WARMUP_CREDITS credits: yes (measure)
           * organic >= ORGANIC_PAIR_MIN x Places: yes
           * otherwise 1 cell in ORGANIC_SAMPLE_EVERY (keeps measuring it);
@@ -1399,6 +1404,8 @@ class CollectionJob:
         i.e. accepted paying one credit for half the records of another."""
         if self.provider is None or not self.provider.supports_places:
             return True
+        if config.PLACES_FIRST and not self._places_weak():
+            return False
         eff = self._kind_eff()
         if eff is None:
             return True
@@ -1431,6 +1438,13 @@ class CollectionJob:
         if eff_p >= ORGANIC_PAIR_MIN * eff_o:
             return True
         return self.planner.cells_issued % ORGANIC_SAMPLE_EVERY == 0
+
+    def _places_weak(self) -> bool:
+        """PLACES_FIRST gives way once Places has had a fair trial for this
+        category and yields under PLACES_FIRST_MIN_YIELD records per credit."""
+        credits, records = self.planner.kind_efficiency()["places"]
+        return (credits >= 2 * KIND_WARMUP_CREDITS
+                and records < config.PLACES_FIRST_MIN_YIELD * credits)
 
     def _kind_eff(self) -> tuple[float, float] | None:
         """(organic, places) valid records per credit, or None while warming

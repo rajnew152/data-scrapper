@@ -468,7 +468,7 @@ def main():
     res = os.path.join(BENCH_DIR, f"result_{LABEL}.json")
     with open(res, "w") as fh:
         json.dump(out, fh, indent=1)
-    print(json.dumps(out, indent=1))
+    print(json.dumps(out, indent=1), flush=True)   # os._exit skips the flush
     os._exit(0)
 
 
