@@ -192,6 +192,9 @@ class CreditLedger:
         cols = ["time", "category", "kind", "query", "page", "credits", "results",
                 "new", "duplicates", "valid", "valid_per_credit", "cache_hits",
                 "timeouts"]
+        # a user's folder does not exist yet when their first run ends
+        # before its first checkpoint
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         tmp = f"{path}.tmp"
         with open(tmp, "w", newline="", encoding="utf-8-sig") as fh:
             w = csv.writer(fh)

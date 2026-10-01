@@ -283,10 +283,24 @@ WORKER_RESTARTS_MAX = 5          # crash restarts per 10 min before giving up
 # office NAT / reverse proxy are not throttled together; the per-IP ceiling
 # only stops a single address from flooding the server. It is sized for
 # 2,000 users behind ONE address polling every 3 s (40,000/min) - behind a
-# reverse proxy also set FORWARDED_ALLOW_IPS so real client IPs are seen.
+# reverse proxy also set TRUSTED_PROXY_HOPS so real client IPs are seen.
 RATE_LIMIT_CLIENT_PER_MIN = _int_env("RATE_LIMIT_CLIENT_PER_MIN", 240, 10, 100_000)
 RATE_LIMIT_COLLECT_PER_MIN = _int_env("RATE_LIMIT_COLLECT_PER_MIN", 10, 1, 10_000)
 RATE_LIMIT_IP_PER_MIN = _int_env("RATE_LIMIT_IP_PER_MIN", 60_000, 100, 100_000_000)
+# Serper credits are paid by the server owner, and a client id is just a
+# random string any caller can change - so what costs credits is ALSO
+# limited per network address (IP), which a caller cannot rotate freely:
+# collection starts per minute, collections queued/running at once, and
+# Serper credits spent per rolling 24 h (0 = no daily limit).
+RATE_LIMIT_COLLECT_PER_IP_PER_MIN = _int_env("RATE_LIMIT_COLLECT_PER_IP_PER_MIN", 20,
+                                             1, 100_000)
+MAX_JOBS_PER_IP = _int_env("MAX_JOBS_PER_IP", 3, 1, 1000)
+MAX_CREDITS_PER_IP_PER_DAY = _int_env("MAX_CREDITS_PER_IP_PER_DAY", 1500, 0, 10_000_000)
+# Reverse proxies in front of the app that APPEND the caller's address to
+# X-Forwarded-For (Render: 1). The client IP is the entry that many places
+# from the right; everything left of it is caller-supplied and ignored.
+# 0 = no proxy: use the TCP peer address and ignore X-Forwarded-For.
+TRUSTED_PROXY_HOPS = _int_env("TRUSTED_PROXY_HOPS", 0, 0, 10)
 # status poll cadence the server suggests to the browser (the page follows it)
 POLL_MS_ACTIVE = _int_env("POLL_MS_ACTIVE", 3000, 1000, 60_000)
 POLL_MS_IDLE = _int_env("POLL_MS_IDLE", 10_000, 2000, 300_000)  # no running job

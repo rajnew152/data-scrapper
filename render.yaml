@@ -19,8 +19,10 @@ services:
         sync: false          # access code the web page asks for
       - key: APP_FORCE_HTTPS
         value: "1"
-      - key: FORWARDED_ALLOW_IPS
-        value: "*"           # only Render's proxy can reach the app
+      - key: TRUSTED_PROXY_HOPS
+        value: "1"           # Render's proxy appends the caller's address to
+                             # X-Forwarded-For; check /api/health "client_ip"
+                             # shows YOUR public IP after a deploy
       # Sized for the free plan (0.1 CPU / 512 MB). Remove on a bigger plan.
       # 3 users collect at the same time; a 4th queues. A lone collection
       # gets 32 crawl threads, each one that joins it 16.

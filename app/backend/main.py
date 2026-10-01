@@ -221,9 +221,27 @@ class AccessStats:
         self.__init__()
 
 
-def client_key(headers: dict, ip: str) -> str:
+def client_key(headers: dict) -> str:
+    """The caller's client id, or "" when missing / malformed. There is no
+    fallback to the IP address: callers sharing (or faking) an address
+    would share one user's data."""
     cid = headers.get(b"x-client-id", b"").decode("latin-1")
-    return cid if CLIENT_ID_RE.match(cid) else f"ip:{ip}"
+    return cid if CLIENT_ID_RE.match(cid) else ""
+
+
+def client_ip(scope, headers: dict) -> str:
+    """The caller's network address. Behind TRUSTED_PROXY_HOPS proxies that
+    append to X-Forwarded-For it is the entry that many places from the
+    right: entries further left are written by the caller and can be
+    faked (the old setup trusted them, so rotating a fake address got
+    around every per-IP limit)."""
+    peer = (scope.get("client") or ("?", 0))[0]
+    hops = config.TRUSTED_PROXY_HOPS
+    if not hops:
+        return peer
+    xff = [p.strip() for p in headers.get(b"x-forwarded-for", b"").decode("latin-1")
+           .split(",") if p.strip()]
+    return xff[-hops] if len(xff) >= hops else peer
 
 
 # ---------------------------------------------------------------------------
@@ -379,12 +397,15 @@ def _int(v, default: int) -> int:
 
 async def h_health(scope, headers, client) -> Reply:
     """Unauthenticated liveness probe. `worker` reports the collection
-    worker: up | starting | down."""
+    worker: up | starting | down. `client_ip` is the address the per-IP
+    limits apply to (check it after deploying behind a proxy: it must be
+    your own public address, not the proxy's)."""
     fresh = time.time() - hub.last_bundle < 5
     worker = "up" if hub.up.is_set() and fresh else (
         "starting" if hub.proc is not None else "down")
     return jreply({"status": "ok", "version": config.APP_VERSION,
-                   "auth_required": bool(config.auth_token()), "worker": worker})
+                   "auth_required": bool(config.auth_token()), "worker": worker,
+                   "client_ip": scope.get("bdc", ("", ""))[1]})
 
 
 async def h_config(scope, headers, client) -> Reply:
@@ -546,8 +567,14 @@ class Guard:
         if self.rl.hit(f"ip|{ip}", config.RATE_LIMIT_IP_PER_MIN):
             log.warning("rate limit (per IP) exceeded: ip=%s path=%s", ip, path)
             return 429, "Too many requests, slow down", retry
+        if not who:
+            if path != "/api/health":
+                return 400, "Missing or invalid X-Client-Id - reload the page", ()
+            who = f"ip:{ip}"                     # health probes: rate limit only
         if path == "/api/collect":
-            if self.rl.hit(f"collect|{who}", config.RATE_LIMIT_COLLECT_PER_MIN):
+            # per address too: a caller can send a new client id every time
+            if self.rl.hit(f"collect-ip|{ip}", config.RATE_LIMIT_COLLECT_PER_IP_PER_MIN) \
+                    or self.rl.hit(f"collect|{who}", config.RATE_LIMIT_COLLECT_PER_MIN):
                 log.warning("rate limit (collect) exceeded: client=%s ip=%s", who[:12], ip)
                 return 429, "Too many requests, slow down", retry
         elif self.rl.hit(f"api|{who}", config.RATE_LIMIT_CLIENT_PER_MIN):
@@ -579,11 +606,12 @@ class Guard:
             await self.app(scope, receive, send)
             return
         path, method = scope["path"], scope["method"]
-        ip = (scope.get("client") or ("?", 0))[0]
         is_api = path.startswith("/api")
         t0 = time.perf_counter()
         headers = dict(scope["headers"])
-        who = client_key(headers, ip)
+        ip = client_ip(scope, headers)
+        who = client_key(headers)
+        scope["bdc"] = (who, ip)          # for the FastAPI endpoints
         if is_api and method != "OPTIONS":
             bad = self._reject(path, headers, ip, who)
             if bad is not None:
@@ -684,8 +712,13 @@ def jresponse(obj, status: int = 200) -> Response:
 
 
 def client_of(request: Request) -> str:
-    return client_key(dict(request.scope["headers"]),
-                      request.client.host if request.client else "?")
+    """Caller's client id (the guard has already rejected requests without
+    a valid one)."""
+    return request.scope["bdc"][0]
+
+
+def ip_of(request: Request) -> str:
+    return request.scope["bdc"][1]
 
 
 class CollectRequest(BaseModel):
@@ -727,7 +760,8 @@ async def start_collect(req: CollectRequest, request: Request):
             "custom_category": req.custom_category,
             "keywords": [k for k in req.keywords.split(",") if k.strip()],
             "location": location, "geo": geo, "target": req.target,
-            "provider": req.provider, "max_queries": req.max_queries}
+            "provider": req.provider, "max_queries": req.max_queries,
+            "ip": ip_of(request)}
     try:
         view = await hub.call("collect", timeout=30, **args)
     except (RpcError, WorkerUnavailable) as exc:

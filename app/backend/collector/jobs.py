@@ -42,6 +42,10 @@ def _slot(job) -> tuple:
     return id(getattr(job, "state", None)), job.category
 
 
+def _credits(job) -> int:
+    return int(getattr(job, "counters", {}).get("serper_credits", 0) or 0)
+
+
 class JobRejected(Exception):
     def __init__(self, status: int, detail: str):
         super().__init__(detail)
@@ -65,6 +69,8 @@ class JobManager:
         self.history: deque[str] = deque()              # finished ids, oldest first
         self.by_client: dict[str, str] = {}             # client -> latest job id
         self.changed: set[str] = set()                  # ids changed since last drain
+        # ip -> (finished at, Serper credits) of finished jobs, last 24 h
+        self.ip_spend: dict[str, deque] = {}
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._reaper, daemon=True,
                                         name="jobs-reaper")
@@ -100,13 +106,31 @@ class JobManager:
     # -- commands ---------------------------------------------------------------
     def submit(self, client: str, category: str, keywords: list[str], location: str,
                target: int, provider: str, max_queries: int, geo: dict | None = None,
-               job_id: str | None = None) -> CollectionJob:
+               job_id: str | None = None, ip: str = "") -> CollectionJob:
         with self.lock:
             mine = [j for j in self.jobs.values()
                     if j.owner == client and j.status in ACTIVE_STATUSES]
             if len(mine) >= config.MAX_JOBS_PER_CLIENT:
                 raise JobRejected(409, "You already have a collection running or "
                                        "queued. Stop it first.")
+            # A client id is caller-chosen; the network address is not. Without
+            # these checks one caller could start unlimited paid collections
+            # by sending a new X-Client-Id each time.
+            remaining = None
+            if ip:
+                same_ip = [j for j in self.jobs.values()
+                           if getattr(j, "ip", "") == ip and j.status in ACTIVE_STATUSES]
+                if len(same_ip) >= config.MAX_JOBS_PER_IP:
+                    raise JobRejected(429, f"Your network already has "
+                                           f"{len(same_ip)} collections running or "
+                                           f"queued. Wait for one to finish.")
+                cap = config.MAX_CREDITS_PER_IP_PER_DAY
+                if cap:
+                    remaining = cap - self._ip_credits_24h(ip)
+                    if remaining <= 0:
+                        raise JobRejected(429, f"Your network has used its daily "
+                                               f"search limit ({cap} Serper credits "
+                                               f"per 24 h). Try again later.")
             if len(self.queue) >= config.MAX_QUEUED_JOBS:
                 raise JobRejected(503, "The server is at capacity (too many "
                                        "collections waiting). Try again in a few "
@@ -115,6 +139,15 @@ class JobManager:
                                    target, provider, max_queries, geo=geo)
             if job_id:
                 job.id = job_id
+            job.ip = ip
+            budget = getattr(job, "credit_budget", None)
+            if remaining is not None and budget is not None \
+                    and (budget == 0 or budget > remaining):
+                job.credit_budget = remaining
+                job.budget_reason = (
+                    f"Daily search limit of your network reached "
+                    f"({config.MAX_CREDITS_PER_IP_PER_DAY} Serper credits per 24 h, "
+                    f"{remaining} were left for this collection)")
             job.owner = client
             job.status = "queued"
             job.crawl_workers = config.job_crawl_workers()
@@ -216,8 +249,26 @@ class JobManager:
             self.changed.add(job.id)
             self._schedule()
 
+    def _ip_credits_24h(self, ip: str) -> int:
+        """Serper credits spent by `ip` in the last 24 h: finished jobs plus
+        what running ones spent so far (caller holds lock). Jobs from one
+        address that run at once can together overshoot the daily limit by
+        at most what they spend in parallel (MAX_JOBS_PER_IP of them)."""
+        now = time.time()
+        spent = self.ip_spend.get(ip)
+        while spent and now - spent[0][0] > 86400:
+            spent.popleft()
+        if spent is not None and not spent:
+            del self.ip_spend[ip]
+        return (sum(c for _, c in spent or ())
+                + sum(_credits(j) for j in self.active.values()
+                      if getattr(j, "ip", "") == ip))
+
     def _retire(self, job: CollectionJob):
         """Move a finished job to the bounded history (caller holds lock)."""
+        if getattr(job, "ip", "") and _credits(job):
+            self.ip_spend.setdefault(job.ip, deque()).append((time.time(),
+                                                              _credits(job)))
         self.history.append(job.id)
         while len(self.history) > config.JOB_HISTORY:
             old = self.history.popleft()

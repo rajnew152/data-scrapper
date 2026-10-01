@@ -40,7 +40,13 @@ trail and known residual risks.
 - This separates cooperating users; it is **not authentication**. Anyone
   who can read another user's browser storage could act as them. Access
   control remains `APP_AUTH_TOKEN` (and, for internet exposure, the reverse
-  proxy). Requests without a valid id are grouped by client IP.
+  proxy). Requests without a valid id are rejected (400): grouping them by
+  IP would let anyone who can fake that IP read their data.
+- Because an id costs nothing to change, everything that spends Serper
+  credits is also limited per network address: `MAX_JOBS_PER_IP`,
+  `MAX_CREDITS_PER_IP_PER_DAY`, `RATE_LIMIT_COLLECT_PER_IP_PER_MIN`. The
+  address is read from `X-Forwarded-For` only as far as `TRUSTED_PROXY_HOPS`
+  proxies wrote it; entries a caller adds are ignored.
 
 ### Rate limiting & abuse
 - In-memory sliding-window limits per user (client id, or IP without one):

@@ -36,6 +36,10 @@ def main():
     # every simulated user comes from 127.0.0.1: the per-IP ceiling would
     # otherwise throttle the whole test (per-client limits stay in force)
     os.environ.setdefault("RATE_LIMIT_IP_PER_MIN", "10000000")
+    # ... and so do the per-address collection limits
+    os.environ.setdefault("RATE_LIMIT_COLLECT_PER_IP_PER_MIN", "100000")
+    os.environ.setdefault("MAX_JOBS_PER_IP", "1000")
+    os.environ.setdefault("MAX_CREDITS_PER_IP_PER_DAY", "0")
 
     sys.path.insert(0, os.path.abspath(args.root))
     sys.path.insert(0, HERE)

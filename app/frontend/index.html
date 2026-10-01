@@ -548,7 +548,7 @@ if (IS_FILE) {
     'http://127.0.0.1:8100</a> instead &mdash; if that link fails, double-click ' +
     '<code>start_app.bat</code> in the app folder first. Redirecting automatically ' +
     'once the backend answers&hellip;';
-  const probe = () => fetch('http://127.0.0.1:8100/api/config', {cache: 'no-store'})
+  const probe = () => fetch('http://127.0.0.1:8100/api/health', {cache: 'no-store'})
     .then(r => { if (r.ok) location.replace('http://127.0.0.1:8100/'); })
     .catch(() => {});
   probe();

@@ -567,6 +567,9 @@ class CollectionJob:
             max(2 * self.max_queries,
                 math.ceil(self.target * config.MAX_CREDITS_PER_RECORD))
             if config.MAX_CREDITS_PER_RECORD > 0 else 0)
+        # Set by JobManager when the per-network daily credit limit is lower
+        # than the budget above: the stop message then names that limit.
+        self.budget_reason = ""
         self.phrases = search_phrases(category, self.display, self.keywords)
         self.extra_phrases = expansion_phrases(category, self.display, self.keywords)
         self.geos = expansion_geos(
@@ -1484,7 +1487,9 @@ class CollectionJob:
         if (self.credit_budget
                 and self.counters["serper_credits"] + searches_inflight >= self.credit_budget):
             self._stop_search = "budget"
-            self.say(f"Credit safety cap reached ({self.credit_budget} credits = "
+            self.say(f"{self.budget_reason} - no further searches; finishing "
+                     f"in-flight work." if self.budget_reason else
+                     f"Credit safety cap reached ({self.credit_budget} credits = "
                      f"{config.MAX_CREDITS_PER_RECORD} x target) - no further "
                      f"searches; finishing in-flight work. Raise or disable "
                      f"MAX_CREDITS_PER_RECORD in app/.env to go further.")
@@ -1868,7 +1873,9 @@ class CollectionJob:
                      f"start again to resume.")
         else:
             self.status = "exhausted"
-            if reason == "budget":
+            if reason == "budget" and self.budget_reason:
+                self.stop_reason = self.budget_reason + "."
+            elif reason == "budget":
                 self.stop_reason = (
                     f"credit safety cap reached ({self.credit_budget} credits = "
                     f"{config.MAX_CREDITS_PER_RECORD} x target). Raise "

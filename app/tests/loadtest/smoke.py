@@ -85,8 +85,11 @@ def main():
         s, _, ja = req("POST", "/api/collect", A, {"category": "Law_Firms",
                                                     "country": "USA", "target": 400})
         assert s == 200 and ja["status"] in ("pending", "running", "queued"), (s, ja)
+        # B's target is larger than A's: B must still be running when the
+        # worker is killed after A finishes (equal targets finished within
+        # 0.5 s of each other, so the crash test raced B's completion)
         s, _, jb = req("POST", "/api/collect", B, {"category": "RPO", "country": "USA",
-                                                    "target": 400})
+                                                    "target": 2000})
         assert s == 200, (s, jb)
         # third job: both slots busy -> queued
         s, _, jc = req("POST", "/api/collect", C, {"category": "Advisory",
@@ -168,7 +171,7 @@ def main():
         s, _, stb = req("GET", "/api/status", B)
         if stb["job"]["status"] in ("running", "pending", "recovering"):
             # find the worker pid: a python child of the server process
-            pid_before = _worker_pid(srv.pid)
+            pid_before = _worker_pid(out)
             assert pid_before, "worker process not found"
             from loadgen import proc_tree
             parsers = [p for p in proc_tree(pid_before) if p != pid_before]
@@ -179,7 +182,7 @@ def main():
             print(f"dead worker's {len(parsers)} parser processes exited with it: OK")
             t0 = time.time()
             ok_restart = wait(lambda: (lambda p: p if p and p != pid_before else None)(
-                _worker_pid(srv.pid)), 30)
+                _worker_pid(out)), 30)
             assert ok_restart, "worker was not restarted"
             stb2 = wait(lambda: (lambda r: r if r["job"] and r["job"]["id"] == stb["job"]["id"]
                                  and r["job"]["status"] in ("running", "completed")
@@ -219,19 +222,20 @@ def _pid_exists(pid: int) -> bool:
         k32.CloseHandle(h)
 
 
-def _worker_pid(server_pid: int):
-    sys.path.insert(0, HERE)
-    from loadgen import proc_tree
-    tree = proc_tree(server_pid)
-    kids = [p for p in tree if p != server_pid]
-    # the worker is the server's direct child; its own children are the
-    # analysis pool - pick the child that has children of its own, else any
-    for p in kids:
-        sub = proc_tree(p)
-        if len(sub) > 1:
-            return p
-    return kids[0] if kids else None
-
+def _worker_pid(out: str):
+    """The current worker's pid, from the server's own log line. (Walking
+    the process tree picked the wrong process when the server runs from a
+    Windows venv: its python.exe is a launcher whose child is the real
+    server, so the "child with children" was the API server itself.)"""
+    import re
+    try:
+        with open(os.path.join(out, "console.txt"), encoding="utf-8",
+                  errors="replace") as fh:
+            pids = re.findall(r"collection worker process started \(pid (\d+)\)",
+                              fh.read())
+    except OSError:
+        return None
+    return int(pids[-1]) if pids else None
 
 if __name__ == "__main__":
     main()

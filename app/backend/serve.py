@@ -32,8 +32,11 @@ def uvicorn_options(host: str, port: int) -> dict:
         "backlog": 4096,
         "timeout_keep_alive": 30,
         "limit_concurrency": int(os.environ.get("HTTP_LIMIT_CONCURRENCY", "6000")),
-        "proxy_headers": True,
-        "forwarded_allow_ips": os.environ.get("FORWARDED_ALLOW_IPS", "127.0.0.1"),
+        # Off: the app reads the client address itself (main.client_ip,
+        # TRUSTED_PROXY_HOPS). uvicorn's proxy handling with the "*" that
+        # Render needs took the LEFTMOST X-Forwarded-For entry, which the
+        # caller writes - any per-IP limit could be dodged with a fake one.
+        "proxy_headers": False,
         "server_header": False,
     }
     if importlib.util.find_spec("httptools"):

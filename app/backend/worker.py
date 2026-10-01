@@ -227,7 +227,8 @@ class Worker:
 
     def cmd_collect(self, client: str, category: str, custom_category: str,
                     keywords: list[str], location: str, geo: dict, target: int,
-                    provider: str, max_queries: int, job_id: str | None = None):
+                    provider: str, max_queries: int, job_id: str | None = None,
+                    ip: str = ""):
         state = self.stores.get(client)
         if category == "__custom__":
             name = " ".join(custom_category.split())
@@ -237,7 +238,8 @@ class Worker:
         elif category not in state.all_categories():
             raise JobRejected(400, "unknown category")
         job = self.manager.submit(client, category, keywords, location, target,
-                                  provider, max_queries, geo=geo, job_id=job_id)
+                                  provider, max_queries, geo=geo, job_id=job_id,
+                                  ip=ip)
         view = self.job_view(job)
         _, view["log"], _ = job.log_since(0)
         return view

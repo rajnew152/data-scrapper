@@ -14,7 +14,8 @@ Start it with `python -m backend.serve` (what the launchers do).
 | `APP_AUTH_TOKEN` | strongly recommended | shared access code for all API calls |
 | `APP_ALLOWED_ORIGINS` | behind a domain | comma-separated CORS origins |
 | `APP_FORCE_HTTPS` | behind TLS | `1` enables the HSTS header |
-| `FORWARDED_ALLOW_IPS` | behind a proxy | the proxy's IP: client IPs are then taken from `X-Forwarded-For` |
+| `TRUSTED_PROXY_HOPS` | behind a proxy | number of proxies that append to `X-Forwarded-For` (Render: 1, nginx in front: 1, none: 0). The client IP is that entry from the right; check `client_ip` in `/api/health` shows your own address |
+| `MAX_JOBS_PER_IP` / `MAX_CREDITS_PER_IP_PER_DAY` | no | per-network limits on paid collections (3 at once / 1500 Serper credits per 24 h, 0 = off) - a client id can be changed freely, an address cannot |
 | `MAX_ACTIVE_JOBS` | no | collections running at once (default 4); others queue |
 | `MAX_JOBS_PER_CLIENT` / `MAX_QUEUED_JOBS` | no | per-user and queue limits (1 / 500) |
 | `RATE_LIMIT_CLIENT_PER_MIN` / `RATE_LIMIT_IP_PER_MIN` | no | per-user (240) and per-IP (60000) request limits |
@@ -57,8 +58,9 @@ server {
 ```
 
 Then set `APP_FORCE_HTTPS=1`, `APP_ALLOWED_ORIGINS=https://collector.example.com`
-and `FORWARDED_ALLOW_IPS=127.0.0.1` (the proxy's address) - without the last
-one every user appears to come from the proxy's IP and shares its per-IP limit.
+and `TRUSTED_PROXY_HOPS=1` (nginx appends the caller's address) - without the
+last one every user appears to come from the proxy's IP and shares its per-IP
+limits.
 
 ## Versioning
 
