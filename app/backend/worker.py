@@ -29,7 +29,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from . import config
+from . import config, persist
 from .collector.categories import CATEGORIES, suggested_keywords
 from .collector.engine import StateStore
 from .collector.jobs import JobManager, JobRejected
@@ -95,6 +95,7 @@ class Worker:
 
     def serve(self):
         threading.Thread(target=self._publisher, daemon=True, name="publisher").start()
+        persist.start_syncer(self.stopping)     # users' data -> database
         while not self.stopping.is_set():
             try:
                 msg = self.conn.recv()
@@ -126,6 +127,10 @@ class Worker:
             self._reply(mid, True, fn(**msg.get("args", {})))
         except JobRejected as exc:
             self._reply(mid, False, status=exc.status, detail=exc.detail)
+        except persist.Unavailable:
+            self._reply(mid, False, status=503,
+                        detail="Your saved data could not be loaded from the "
+                               "database - try again in a minute.")
         except Exception as exc:
             log.exception("command %s failed", cmd)
             self._reply(mid, False, status=500, detail=f"{type(exc).__name__}")
@@ -298,6 +303,7 @@ class Worker:
             records = {c: list(rs) for c, rs in state.records.items()}
             stats = {c: dict(s) for c, s in state.stats.items()}
         write_master_summary(cats, records, stats, state.out_dir)
+        persist.sync(client)
         return {"ok": True, "removed": removed, "was_custom": is_custom,
                 "display": display}
 
@@ -307,6 +313,7 @@ class Worker:
         if self.manager.any_active(self.stores.get(client)):
             raise JobRejected(409, "stop your running collection first")
         self.stores.replace(client)
+        persist.sync(client)
         return {"ok": True}
 
     # -- lifecycle ----------------------------------------------------------------

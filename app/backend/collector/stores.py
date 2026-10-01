@@ -9,6 +9,10 @@ dedup (SharedSearch), so the same search is never paid for twice.
 
 Stores are loaded on first use and unloaded (checkpoint written first)
 after config.STORE_IDLE_S without a request or a running job.
+
+With a database configured, each user's folder is first restored from it
+and kept mirrored to it (backend/persist.py), so a wiped disk loses
+nothing.
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ import os
 import threading
 import time
 
-from .. import config
+from .. import config, persist
 from .engine import SharedSearch, StateStore
 
 log = logging.getLogger("stores")
@@ -41,6 +45,14 @@ class StoreRegistry:
         return os.path.join(config.OUTPUT_DIR, "search_cache.json")
 
     def get(self, client: str) -> StateStore:
+        with self.lock:
+            st = self.stores.get(client)
+            if st is not None:
+                self.last_used[client] = time.time()
+                return st
+        # outside the lock: may wait for the database (raises
+        # persist.Unavailable rather than load an empty folder)
+        persist.restore(client)
         with self.lock:
             self.last_used[client] = time.time()
             st = self.stores.get(client)
@@ -78,6 +90,7 @@ class StoreRegistry:
     def evict_idle(self, busy: set[str]):
         """Unload stores idle for STORE_IDLE_S (not `busy` = running jobs)."""
         now = time.time()
+        unloaded = []
         with self.lock:
             for c in [c for c, t in self.last_used.items()
                       if c not in busy and now - t > config.STORE_IDLE_S]:
@@ -88,6 +101,9 @@ class StoreRegistry:
                         st.close()
                     except Exception:
                         log.exception("saving unloaded user store")
+                    unloaded.append(c)
+        for c in unloaded:               # the database, outside the lock
+            persist.sync(c)
         self.save_cache()
 
     def save_cache(self):
@@ -102,4 +118,5 @@ class StoreRegistry:
                 st.flush()
             except Exception:
                 log.exception("final checkpoint of a user store")
+        persist.sync_all()
         self.save_cache()

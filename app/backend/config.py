@@ -299,12 +299,16 @@ MAX_CREDITS_PER_IP_PER_DAY = _int_env("MAX_CREDITS_PER_IP_PER_DAY", 1500, 0, 10_
 # Login / sign-up / login attempts per address per minute (password guessing).
 RATE_LIMIT_AUTH_PER_IP_PER_MIN = _int_env("RATE_LIMIT_AUTH_PER_IP_PER_MIN", 10, 1, 10_000)
 
-# ---- User accounts (backend/auth.py) ------------------------------------
-# Set MONGODB_URI to require login: users + sessions are stored in MongoDB
-# and each account gets its own records. Unset = anonymous per-browser data.
-MONGODB_URI = os.environ.get("MONGODB_URI", "").strip()
-MONGODB_DB = os.environ.get("MONGODB_DB", "").strip() or "business_data_collector"
+# ---- User accounts + saved data (backend/auth.py, backend/persist.py) ----
+# Set SUPABASE_DB_URL (a Postgres connection string; Supabase: Connect ->
+# Session pooler) to require login. Users, sessions and every user's
+# records + Excel files are then kept in the database, so they survive a
+# restart / redeploy that wipes the server's disk (Render's free plan).
+# Unset = anonymous per-browser data on local disk only.
+DATABASE_URL = os.environ.get("SUPABASE_DB_URL", "").strip()
 SESSION_DAYS = _int_env("SESSION_DAYS", 30, 1, 365)
+# seconds between uploads of a user's changed checkpoint / Excel files
+PERSIST_SYNC_INTERVAL = _float_env("PERSIST_SYNC_INTERVAL", 30.0, 5.0, 3600.0)
 # Reverse proxies in front of the app that APPEND the caller's address to
 # X-Forwarded-For (Render: 1). The client IP is the entry that many places
 # from the right; everything left of it is caller-supplied and ignored.

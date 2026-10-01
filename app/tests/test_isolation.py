@@ -79,7 +79,7 @@ def main():
     env = dict(os.environ, TRUSTED_PROXY_HOPS="1", MAX_JOBS_PER_IP="2",
                MAX_CREDITS_PER_IP_PER_DAY="4", RATE_LIMIT_COLLECT_PER_IP_PER_MIN="1000",
                MAX_ACTIVE_JOBS="8",
-               MONGODB_URI="")   # anonymous per-browser mode, even with a local .env login setup
+               SUPABASE_DB_URL="")   # anonymous per-browser mode, even with a local .env login setup
     log = open(os.path.join(out, "server.txt"), "w")
     srv = subprocess.Popen([sys.executable, os.path.join(HERE, "loadtest", "server.py"),
                             "--root", APP, "--port", str(PORT), "--out", out],

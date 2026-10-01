@@ -1,12 +1,14 @@
 """User accounts: sign-up, login, sessions.
 
-Enabled when MONGODB_URI is set (users and sessions live in MongoDB);
-without it the app keeps working with anonymous per-browser client ids.
+Enabled when SUPABASE_DB_URL is set (users and sessions live in Postgres,
+see db.py); without it the app keeps working with anonymous per-browser
+client ids.
 
   * passwords are stored only as scrypt hashes (random salt per user)
   * a login returns a random session token; the database keeps only its
-    SHA-256, so a leaked sessions collection cannot be replayed
-  * sessions expire after SESSION_DAYS (MongoDB TTL index)
+    SHA-256, so a leaked sessions table cannot be replayed
+  * sessions expire after SESSION_DAYS (expired rows are purged at
+    each login)
   * a logged-in user's identity ("u" + user id) replaces the browser
     client id: their records, jobs and Excel files follow the account
     to any browser
@@ -28,7 +30,7 @@ import time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 
-from . import config
+from . import config, db
 
 log = logging.getLogger("auth")
 
@@ -88,41 +90,51 @@ class DuplicateEmail(Exception):
     pass
 
 
-class MongoStore:
-    def __init__(self, uri: str, db_name: str):
-        from pymongo import ASCENDING, MongoClient
-        self.client = MongoClient(uri, serverSelectionTimeoutMS=10_000,
-                                  connectTimeoutMS=10_000, appname="business-data-collector")
-        db = self.client[db_name]
-        self.users, self.sessions = db["users"], db["sessions"]
-        self.users.create_index([("email", ASCENDING)], unique=True)
-        self.sessions.create_index([("token_hash", ASCENDING)], unique=True)
-        self.sessions.create_index("expires_at", expireAfterSeconds=0)   # TTL
+class PgStore:
+    """Users + sessions in Postgres (tables: db.py)."""
 
     def create_user(self, doc: dict) -> str:
-        from pymongo.errors import DuplicateKeyError
+        from psycopg.errors import UniqueViolation
+        uid = secrets.token_hex(12)
         try:
-            return str(self.users.insert_one(doc).inserted_id)
-        except DuplicateKeyError:
+            with db.connection() as conn:
+                conn.execute(
+                    f"INSERT INTO {db.SCHEMA}.users (id, name, email, password_hash,"
+                    " created_at) VALUES (%s, %s, %s, %s, %s)",
+                    (uid, doc["name"], doc["email"], doc["password_hash"],
+                     doc["created_at"]))
+        except UniqueViolation:
             raise DuplicateEmail() from None
+        return uid
 
     def user_by_email(self, email: str) -> dict | None:
-        doc = self.users.find_one({"email": email})
-        if doc:
-            doc["id"] = str(doc.pop("_id"))
-        return doc
+        with db.connection() as conn:
+            row = conn.execute(
+                f"SELECT id, name, email, password_hash FROM {db.SCHEMA}.users"
+                " WHERE email = %s", (email,)).fetchone()
+        return (dict(zip(("id", "name", "email", "password_hash"), row))
+                if row else None)
 
     def create_session(self, token_hash: str, user: dict, expires: datetime):
-        self.sessions.insert_one({"token_hash": token_hash, "user_id": user["id"],
-                                  "name": user["name"], "email": user["email"],
-                                  "created_at": _now(), "expires_at": expires})
+        with db.connection() as conn:
+            conn.execute(f"DELETE FROM {db.SCHEMA}.sessions WHERE expires_at < now()")
+            conn.execute(
+                f"INSERT INTO {db.SCHEMA}.sessions (token_hash, user_id, expires_at)"
+                " VALUES (%s, %s, %s)", (token_hash, user["id"], expires))
 
     def session(self, token_hash: str) -> dict | None:
-        return self.sessions.find_one({"token_hash": token_hash,
-                                       "expires_at": {"$gt": _now()}})
+        with db.connection() as conn:
+            row = conn.execute(
+                f"SELECT u.id, u.name, u.email FROM {db.SCHEMA}.sessions s"
+                f" JOIN {db.SCHEMA}.users u ON u.id = s.user_id"
+                " WHERE s.token_hash = %s AND s.expires_at > now()",
+                (token_hash,)).fetchone()
+        return (dict(zip(("user_id", "name", "email"), row)) if row else None)
 
     def delete_session(self, token_hash: str):
-        self.sessions.delete_one({"token_hash": token_hash})
+        with db.connection() as conn:
+            conn.execute(f"DELETE FROM {db.SCHEMA}.sessions WHERE token_hash = %s",
+                         (token_hash,))
 
 
 class MemoryStore:
@@ -167,11 +179,11 @@ _cache: "OrderedDict[str, tuple[float, dict | None]]" = OrderedDict()
 
 
 def enabled() -> bool:
-    return _store is not None or bool(config.MONGODB_URI)
+    return _store is not None or db.enabled()
 
 
 def use_store(store):
-    """Install a store (tests); None = back to MONGODB_URI."""
+    """Install a store (tests); None = back to the database."""
     global _store
     with _store_lock:
         _store = store
@@ -183,7 +195,7 @@ def _get_store():
     if _store is None:
         with _store_lock:
             if _store is None:
-                _store = MongoStore(config.MONGODB_URI, config.MONGODB_DB)
+                _store = PgStore()
     return _store
 
 

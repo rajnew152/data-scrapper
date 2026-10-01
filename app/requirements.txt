@@ -12,5 +12,6 @@ lxml==6.1.3
 # checkpoint ~10x faster, httptools parses HTTP several times faster than h11.
 orjson==3.12.0
 httptools==0.8.0
-# Accounts (login / sign-up): users + sessions in MongoDB when MONGODB_URI is set
-pymongo==4.18.2
+# Accounts + saved user data in Supabase Postgres when SUPABASE_DB_URL is set
+psycopg[binary]==3.3.6
+psycopg-pool==3.3.3

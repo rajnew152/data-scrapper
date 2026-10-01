@@ -12,6 +12,7 @@ Start it with `python -m backend.serve` (what the launchers do).
 |---|---|---|
 | `SERPER_API_KEY` | yes | Serper.dev key (search + Places) |
 | `APP_AUTH_TOKEN` | strongly recommended | shared access code for all API calls |
+| `SUPABASE_DB_URL` | on Render | Postgres connection string (Supabase: Connect → Session pooler, password URL-encoded). Turns on login / sign-up and keeps users, sessions and every user's records + Excel files in the database (schema `bdc`, created on first start), so a restart that wipes the disk loses nothing. Changed data is uploaded every `PERSIST_SYNC_INTERVAL` s (30) and at shutdown |
 | `APP_ALLOWED_ORIGINS` | behind a domain | comma-separated CORS origins |
 | `APP_FORCE_HTTPS` | behind TLS | `1` enables the HSTS header |
 | `TRUSTED_PROXY_HOPS` | behind a proxy | number of proxies that append to `X-Forwarded-For` (Render: 1, nginx in front: 1, none: 0). The client IP is that entry from the right; check `client_ip` in `/api/health` shows your own address |

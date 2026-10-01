@@ -66,7 +66,7 @@ def main():
     ap.add_argument("--state", default="")
     a = ap.parse_args()
     out = tempfile.mkdtemp(prefix="smoke_")
-    env = dict(os.environ, MAX_ACTIVE_JOBS="2", MONGODB_URI="")   # anonymous mode
+    env = dict(os.environ, MAX_ACTIVE_JOBS="2", SUPABASE_DB_URL="")   # anonymous mode
     cmd = [sys.executable, os.path.join(HERE, "server.py"), "--root", ROOT,
            "--port", str(PORT), "--out", out]
     if a.state:

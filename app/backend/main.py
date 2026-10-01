@@ -47,7 +47,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from . import auth, config, fastjson
+from . import auth, config, fastjson, persist
 from .collector.categories import SUMMARY_FILE
 from .hub import RpcError, WorkerHub, WorkerUnavailable
 
@@ -501,6 +501,9 @@ async def h_files(scope, headers, client) -> Reply:
     """The caller's own Excel files."""
     t, body = _files_listing.get(client, (0.0, b""))
     if time.monotonic() - t > 2.0:
+        if persist.enabled():
+            # the worker restores the user's saved files when it loads them
+            await my_categories(client)
         body = await asyncio.to_thread(_list_files, config.client_dir(client))
         _files_listing[client] = (time.monotonic(), body)
         _files_listing.move_to_end(client)
@@ -755,7 +758,7 @@ class LoginRequest(BaseModel):
 def _auth_off():
     if not auth.enabled():
         raise HTTPException(404, "Accounts are not enabled on this server "
-                                 "(set MONGODB_URI).")
+                                 "(set SUPABASE_DB_URL).")
 
 
 @api.post("/api/auth/signup")
