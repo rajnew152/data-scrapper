@@ -1,0 +1,50 @@
+# Runs the test suite on every push and pull request. render.yaml deploys a
+# commit only after these checks pass (autoDeployTrigger: checksPass).
+# No Serper key is needed: the tests use simulated search + websites.
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    # same OS as Render
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: app/requirements.txt
+      - run: pip install -r requirements.txt
+      - run: python tests/test_security.py
+      - run: python tests/test_isolation.py
+      - run: python tests/test_concurrency.py
+      - run: python tests/test_credits.py
+      - run: python tests/test_pipeline.py
+      - run: python tests/test_performance.py
+      - run: python tests/test_resilience.py
+
+  windows-smoke:
+    # the smoke test drives a real server and kills its worker (Windows
+    # process APIs); it also covers the local start_app.bat setup
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: app/requirements.txt
+      - run: pip install -r requirements.txt
+      - run: python tests/loadtest/smoke.py

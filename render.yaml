@@ -9,7 +9,9 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: python -m backend.serve --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/health
-    autoDeploy: true
+    # deploy a commit only after the GitHub Actions tests pass on it
+    # (.github/workflows/tests.yml); a failing or missing check never deploys
+    autoDeployTrigger: checksPass
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.10
