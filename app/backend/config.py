@@ -245,9 +245,10 @@ MAX_CONTROLLER_ERRORS = 25       # consecutive controller-loop failures -> FAILE
 MAX_ACTIVE_JOBS = _int_env("MAX_ACTIVE_JOBS", 3 if SMALL_HOST else 4, 1, 32)
 MAX_QUEUED_JOBS = _int_env("MAX_QUEUED_JOBS", 500, 1, 10_000)
 MAX_JOBS_PER_CLIENT = _int_env("MAX_JOBS_PER_CLIENT", 1, 1, 10)
-# Crawl threads across ALL running jobs; each job gets an equal slice
-# (at most CRAWL_WORKERS, at least 8). Bounds threads / sockets / memory.
-# Small host: 48 = 16 per job at 3 jobs (16 measured as fast as 32 at 1 CPU).
+# Crawl threads across ALL running jobs (see job_crawl_workers): a job takes
+# what is left (at most CRAWL_WORKERS) but never less than an equal slice
+# (at least 8). Bounds threads / sockets / memory.
+# Small host: 48 = a lone job's 32, then 16 for each job that joins it.
 GLOBAL_CRAWL_WORKERS = _int_env("GLOBAL_CRAWL_WORKERS", 48 if SMALL_HOST else 192,
                                 16, 800)
 JOB_HISTORY = 300                # finished jobs kept for their owners' status
@@ -301,9 +302,14 @@ def serper_api_key() -> str:
     return os.environ.get("SERPER_API_KEY", "").strip()
 
 
-def job_crawl_workers() -> int:
-    """Crawl threads per running job: an equal slice of the global budget."""
-    return max(8, min(CRAWL_WORKERS, GLOBAL_CRAWL_WORKERS // max(1, MAX_ACTIVE_JOBS)))
+def job_crawl_workers(in_use: int = 0) -> int:
+    """Crawl threads for a job starting while running jobs hold in_use: what
+    is left of the global budget (up to CRAWL_WORKERS), never less than an
+    equal slice. A job running alone gets the full CRAWL_WORKERS - an equal
+    slice reserved for jobs that are not there halved its threads (measured
+    on Render Free: 100 records 45-62 s with 16 threads)."""
+    fair = max(8, min(CRAWL_WORKERS, GLOBAL_CRAWL_WORKERS // max(1, MAX_ACTIVE_JOBS)))
+    return max(fair, min(CRAWL_WORKERS, GLOBAL_CRAWL_WORKERS - in_use))
 
 
 def auth_token() -> str:

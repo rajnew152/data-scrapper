@@ -22,8 +22,8 @@ services:
       - key: FORWARDED_ALLOW_IPS
         value: "*"           # only Render's proxy can reach the app
       # Sized for the free plan (0.1 CPU / 512 MB). Remove on a bigger plan.
-      # 3 users collect at the same time (16 crawl threads each); a 4th
-      # queues. Measured: 16 threads per job is as fast as 32 at this CPU.
+      # 3 users collect at the same time; a 4th queues. A lone collection
+      # gets 32 crawl threads, each one that joins it 16.
       - key: MAX_ACTIVE_JOBS
         value: "3"
       - key: GLOBAL_CRAWL_WORKERS

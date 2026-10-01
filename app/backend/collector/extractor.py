@@ -58,6 +58,7 @@ PHONE_CONTEXT_RE = re.compile(
     r"tel|phone|call|mob|whatsapp|contact|ph\b|dial|hotline|toll", re.I
 )
 ADDR_CLASS_RE = re.compile(r"(^|[\s_\-])(address|addr|location|office)([\s_\-]|$)", re.I)
+ADDR_CLASS_WORDS = ("addr", "location", "office")   # substrings any match contains
 ADDR_WORD_RE = re.compile(
     r"\b(street|st\.|road|rd\.|avenue|ave\.?|suite|ste\.|floor|fl\.|building|"
     r"bldg|blvd|boulevard|lane|ln\.|drive|dr\.|plaza|tower|towers|sector|nagar|"
@@ -283,11 +284,14 @@ def extract_address(doc, text: str) -> str:
         t = clean_text(dom.text(el, " "))
         if ok(t):
             return t
-    for el in dom.with_class_or_id(doc, ADDR_CLASS_RE, 20, 10):
+    for el in dom.with_class_or_id(doc, ADDR_CLASS_RE, 20, 10, ADDR_CLASS_WORDS):
         t = clean_text(dom.text(el, " "))
         if ok(t) and "@" not in t and ADDR_WORD_RE.search(t):
             return t
     for line in text.splitlines():
+        # cheap checks first: clean_text never adds commas or digits
+        if line.count(",") < 2 or not any(ch.isdigit() for ch in line):
+            continue
         line = clean_text(line)
         if 15 <= len(line) <= 200 and line.count(",") >= 2 and ok(line) and ADDR_WORD_RE.search(line):
             return line
@@ -298,9 +302,10 @@ def build_services(doc, ld_desc: str) -> str:
     desc = clean_text(ld_desc or meta_content(doc, "description", "og:description"))[:220]
     items: list[str] = []
     for a in dom.anchors(doc):
-        href = a.get("href").lower()
+        if not SERVICE_HREF_RE.search(a.get("href")):
+            continue
         txt = clean_text(dom.text(a, " "))
-        if 3 <= len(txt) <= 45 and SERVICE_HREF_RE.search(href) and txt.lower() not in GENERIC_LINK_TEXT:
+        if 3 <= len(txt) <= 45 and txt.lower() not in GENERIC_LINK_TEXT:
             if txt not in items:
                 items.append(txt)
         if len(items) >= 10:

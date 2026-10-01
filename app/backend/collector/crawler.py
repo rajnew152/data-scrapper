@@ -240,8 +240,7 @@ def find_contact_links(doc, base_url: str) -> list[str]:
         href = a.get("href").strip()
         if href.lower().startswith(("mailto:", "tel:", "javascript:", "#")):
             continue
-        txt = dom.text(a, " ")
-        if CONTACT_LINK_RE.search(href) or CONTACT_LINK_RE.search(txt):
+        if CONTACT_LINK_RE.search(href) or CONTACT_LINK_RE.search(dom.text(a, " ")):
             full = urljoin(base_url, href).split("#")[0]
             if not full.lower().startswith("http"):
                 continue

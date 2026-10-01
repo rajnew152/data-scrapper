@@ -111,6 +111,12 @@ def test_rules():
     assert c.status == "queued" and d.status == "queued"
     assert m.queue_position(c.id) == 1 and m.queue_position(d.id) == 2
     assert a.search_share() == 2 and a.crawl_workers == config.job_crawl_workers()
+    # the first job takes what is free; the second what a leaves, at least
+    # an equal slice
+    assert b.crawl_workers == config.job_crawl_workers(a.crawl_workers)
+    fair = max(8, min(config.CRAWL_WORKERS,
+                      config.GLOBAL_CRAWL_WORKERS // config.MAX_ACTIVE_JOBS))
+    assert a.crawl_workers >= b.crawl_workers >= fair
     print("  slots + FIFO + fair share: OK")
 
     # b finishes -> d (free category) overtakes c (its category is busy)

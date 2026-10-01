@@ -12,9 +12,10 @@ Isolation rules
     that data, so two jobs filling it would race each other); a second job
     for a busy category waits, and other queued jobs go ahead of it
   * each client (browser) may have MAX_JOBS_PER_CLIENT queued/running jobs
-  * shared resources are split fairly: every running job gets an equal
-    slice of the crawl threads (config.job_crawl_workers) and of the Serper
-    account's concurrency (job.search_share), and all jobs pass through the
+  * shared resources are split fairly: a starting job gets the crawl
+    threads the running jobs leave free, at least an equal slice
+    (config.job_crawl_workers), every running job an equal slice of the
+    Serper account's concurrency (job.search_share), and all jobs pass through the
     same account rate limiter (search.account_limits)
 
 A job never waits on another job's work: its searches, crawl pool,
@@ -193,6 +194,8 @@ class JobManager:
             if _slot(job) in busy:
                 continue                 # wait for the job filling this category
             self.queue.remove(jid)
+            job.crawl_workers = config.job_crawl_workers(
+                sum(j.crawl_workers for j in self.active.values()))
             self.active[jid] = job
             busy.add(_slot(job))
             job.status = "pending"
