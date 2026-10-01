@@ -769,8 +769,11 @@ let savedFileCount = 0;
 let fileDbPromise = null;
 function fileDb() {
   if (!fileDbPromise) {
+    // 'bdc_files' held copies from when every user shared one set of Excel
+    // files (other users' data included): drop it, keep only our own files.
+    try { indexedDB.deleteDatabase('bdc_files'); } catch (e) {}
     fileDbPromise = new Promise((resolve, reject) => {
-      const req = indexedDB.open('bdc_files', 1);
+      const req = indexedDB.open('bdc_files_own', 1);
       req.onupgradeneeded = () => req.result.createObjectStore('files', {keyPath: 'name'});
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);

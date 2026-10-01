@@ -6,9 +6,11 @@
 
 Isolation rules
   * up to MAX_ACTIVE_JOBS jobs run at once; more wait in a FIFO queue
-  * one job per CATEGORY at a time (a category's target is shared, so two
-    jobs filling it would race each other); a second job for a busy
-    category waits, and queued jobs for other categories go ahead of it
+  * every user has their own data (state_for(client), see stores.py): their
+    records are never visible to, or counted for, anyone else
+  * one job per CATEGORY of one user's data at a time (the target counts
+    that data, so two jobs filling it would race each other); a second job
+    for a busy category waits, and other queued jobs go ahead of it
   * each client (browser) may have MAX_JOBS_PER_CLIENT queued/running jobs
   * shared resources are split fairly: every running job gets an equal
     slice of the crawl threads (config.job_crawl_workers) and of the Serper
@@ -16,8 +18,8 @@ Isolation rules
     same account rate limiter (search.account_limits)
 
 A job never waits on another job's work: its searches, crawl pool,
-planner, watchdog and failure handling are its own. Only the checkpoint
-writer and the dedup registry are shared (both are internally locked).
+planner, watchdog and failure handling are its own. Only the Serper
+response cache is shared between users (internally locked).
 """
 
 from __future__ import annotations
@@ -34,6 +36,11 @@ from .engine import ACTIVE_STATUSES, CollectionJob, StateStore
 log = logging.getLogger("jobs")
 
 
+def _slot(job) -> tuple:
+    """What two jobs must not fill at once: one category of one user's data."""
+    return id(getattr(job, "state", None)), job.category
+
+
 class JobRejected(Exception):
     def __init__(self, status: int, detail: str):
         super().__init__(detail)
@@ -42,9 +49,12 @@ class JobRejected(Exception):
 
 
 class JobManager:
-    def __init__(self, state: StateStore, max_active: int | None = None,
-                 job_factory=CollectionJob):
+    def __init__(self, state: StateStore | None = None, max_active: int | None = None,
+                 job_factory=CollectionJob, state_for=None):
+        # state_for(client) -> that user's StateStore (per-user data); without
+        # it every job uses the one `state`.
         self.state = state
+        self.state_for = state_for or (lambda client: state)
         self.max_active = max_active or config.MAX_ACTIVE_JOBS
         self.job_factory = job_factory
         self.lock = threading.RLock()
@@ -100,8 +110,8 @@ class JobManager:
                 raise JobRejected(503, "The server is at capacity (too many "
                                        "collections waiting). Try again in a few "
                                        "minutes.")
-            job = self.job_factory(self.state, category, keywords, location, target,
-                                   provider, max_queries, geo=geo)
+            job = self.job_factory(self.state_for(client), category, keywords, location,
+                                   target, provider, max_queries, geo=geo)
             if job_id:
                 job.id = job_id
             job.owner = client
@@ -115,7 +125,7 @@ class JobManager:
             self.changed.add(job.id)
             self._schedule()
             if job.status == "queued":
-                busy = any(j.category == category for j in self.active.values())
+                busy = any(_slot(j) == _slot(job) for j in self.active.values())
                 job.say(f"Queued: position {self.queue_position(job.id)} - "
                         + ("another collection is filling this category right now; "
                            "this one starts when it finishes"
@@ -156,28 +166,35 @@ class JobManager:
                 j.thread.join(max(0.1, t_end - time.time()))
         self._stop.set()
 
-    def category_busy(self, category: str) -> bool:
+    def category_busy(self, category: str, state: StateStore | None = None) -> bool:
+        """A job of `state`'s data (default: any) is filling `category`."""
         with self.lock:
             return any(j.category == category and j.status in ACTIVE_STATUSES
+                       and (state is None or j.state is state)
                        for j in self.jobs.values())
 
-    def any_active(self) -> bool:
+    def any_active(self, state: StateStore | None = None) -> bool:
         with self.lock:
-            return bool(self.active or self.queue)
+            return any(j.status in ACTIVE_STATUSES and (state is None or j.state is state)
+                       for j in self.jobs.values())
+
+    def owners_active(self) -> set[str]:
+        with self.lock:
+            return {j.owner for j in self.jobs.values() if j.status in ACTIVE_STATUSES}
 
     # -- scheduling -------------------------------------------------------------
     def _schedule(self):
         """Start queued jobs while slots are free (caller holds self.lock)."""
-        busy = {j.category for j in self.active.values()}
+        busy = {_slot(j) for j in self.active.values()}
         for jid in list(self.queue):
             if len(self.active) >= self.max_active:
                 break
             job = self.jobs[jid]
-            if job.category in busy:
+            if _slot(job) in busy:
                 continue                 # wait for the job filling this category
             self.queue.remove(jid)
             self.active[jid] = job
-            busy.add(job.category)
+            busy.add(_slot(job))
             job.status = "pending"
             self.changed.add(jid)
             try:

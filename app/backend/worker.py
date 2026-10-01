@@ -33,6 +33,7 @@ from . import config
 from .collector.categories import CATEGORIES, suggested_keywords
 from .collector.engine import StateStore
 from .collector.jobs import JobManager, JobRejected
+from .collector.stores import StoreRegistry
 
 log = logging.getLogger("worker")
 
@@ -69,14 +70,16 @@ class Worker:
     def __init__(self, conn, resume: list[dict] | None = None):
         self.conn = conn
         self.send_lock = threading.Lock()
-        self.state = StateStore.load(config.STATE_PATH)
-        self.manager = JobManager(self.state)
+        # every user's records / stats / Excel files are their own
+        self.stores = StoreRegistry()
+        self.manager = JobManager(state_for=self.stores.get)
         self.pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="rpc")
         self.stopping = threading.Event()
         self.epoch = f"{os.getpid()}-{int(time.time())}"
         self._log_sent: dict[str, int] = {}     # job id -> log seq published
         self._pos_sent: dict[str, int] = {}     # queued job id -> position published
-        self._stats_rev = -1
+        self._client_rev: dict[str, tuple] = {}  # client -> (gen, rev) published
+        self._last_evict = time.time()
         for r in resume or []:                  # jobs running when a worker died
             try:
                 self.cmd_collect(**r)
@@ -128,14 +131,23 @@ class Worker:
             self._reply(mid, False, status=500, detail=f"{type(exc).__name__}")
 
     # -- status bundle ------------------------------------------------------
-    def per_category(self) -> dict:
-        cats = self.state.all_categories()
-        stats = self.state.category_stats()
+    @staticmethod
+    def per_category(state: StateStore) -> dict:
+        """One user's categories with their counts."""
+        cats = state.all_categories()
+        stats = state.category_stats()
         return {c: {"display": d["display"], "file": d["file"],
                     "custom": c not in CATEGORIES,
                     "suggested": suggested_keywords(c),
                     **stats.get(c, {"count": 0, "emails": 0, "websites": 0})}
                 for c, d in cats.items()}
+
+    def client_view(self, state: StateStore) -> dict:
+        with state.lock:
+            rev, cat_rev = state.rev, dict(state.cat_rev)
+        # "ver" orders views of one user: (store generation, revision)
+        return {"ver": [getattr(state, "gen", 0), rev],
+                "per_category": self.per_category(state), "cat_rev": cat_rev}
 
     def job_view(self, job) -> dict:
         snap = job.snapshot(include_log=False)
@@ -176,27 +188,32 @@ class Worker:
             self._log_sent[j.id] = seq
         for jid in [k for k in self._log_sent if k not in m.jobs]:
             del self._log_sent[jid]
-        out = {"type": "bundle", "epoch": self.epoch, "time": time.time(),
-               "jobs": jobs, "logs": logs, "known": known, "queue": summary,
-               "cat_rev": dict(self.state.cat_rev),
-               "active": active[:50],
-               "worker": {"pid": os.getpid(), "threads": threading.active_count(),
-                          "saves": self.state.saves,
-                          "last_save_ms": round(1000 * self.state.last_save_s, 1)}}
-        if self.state.rev != self._stats_rev:
-            self._stats_rev = self.state.rev
-            out["per_category"] = self.per_category()
-        return out
+        # per-user category stats, only for users whose data changed
+        clients = {}
+        loaded = self.stores.loaded()
+        for client, st in loaded:
+            if (getattr(st, "gen", 0), st.rev) != self._client_rev.get(client):
+                view = self.client_view(st)
+                self._client_rev[client] = tuple(view["ver"])
+                clients[client] = view
+        live_clients = {c for c, _ in loaded}
+        for c in [c for c in self._client_rev if c not in live_clients]:
+            del self._client_rev[c]
+        return {"type": "bundle", "epoch": self.epoch, "time": time.time(),
+                "jobs": jobs, "logs": logs, "known": known, "queue": summary,
+                "clients": clients,
+                "active": active[:50],
+                "worker": {"pid": os.getpid(), "threads": threading.active_count(),
+                           "users_loaded": len(loaded),
+                           "saves": sum(st.saves for _, st in loaded)}}
 
     def _publisher(self):
-        first = True
         while not self.stopping.is_set():
             try:
-                b = self.bundle()
-                if first:           # the API needs the category list at once
-                    b["per_category"] = self.per_category()
-                    first = False
-                self.send(b)
+                if time.time() - self._last_evict > 60:
+                    self._last_evict = time.time()
+                    self.stores.evict_idle(self.manager.owners_active())
+                self.send(self.bundle())
             except (OSError, EOFError, BrokenPipeError):
                 self.stopping.set()
                 break
@@ -211,12 +228,13 @@ class Worker:
     def cmd_collect(self, client: str, category: str, custom_category: str,
                     keywords: list[str], location: str, geo: dict, target: int,
                     provider: str, max_queries: int, job_id: str | None = None):
+        state = self.stores.get(client)
         if category == "__custom__":
             name = " ".join(custom_category.split())
             if len(name) < 3:
                 raise JobRejected(400, "Enter a custom category name (3+ characters).")
-            category = self.state.ensure_custom(name)
-        elif category not in self.state.all_categories():
+            category = state.ensure_custom(name)
+        elif category not in state.all_categories():
             raise JobRejected(400, "unknown category")
         job = self.manager.submit(client, category, keywords, location, target,
                                   provider, max_queries, geo=geo, job_id=job_id)
@@ -230,66 +248,63 @@ class Worker:
             raise JobRejected(404, "no collection of yours to stop")
         return self.job_view(job)
 
-    def cmd_records(self, category: str, limit: int):
-        if category not in self.state.all_categories():
+    def cmd_categories(self, client: str):
+        """The caller's categories + counts (the API caches them; bundles
+        keep them current while the user's data is loaded)."""
+        return self.client_view(self.stores.get(client))
+
+    def cmd_records(self, client: str, category: str, limit: int):
+        state = self.stores.get(client)
+        if category not in state.all_categories():
             raise JobRejected(400, "unknown category")
-        with self.state.lock:
-            rows = self.state.records.get(category, [])
+        with state.lock:
+            rows = state.records.get(category, [])
             total = len(rows)
             rows = list(rows)[-limit:] if limit > 0 else []
-            rev = self.state.cat_rev[category]
+            rev = state.cat_rev[category]
         return {"category": category, "total": total, "records": rows[::-1],
-                "rev": rev}
+                "rev": [getattr(state, "gen", 0), rev]}
 
     def cmd_credits(self, client: str):
         job = self.manager.client_job(client)
-        return {"ledger": self.state.ledger.summary(),
+        return {"ledger": self.stores.get(client).ledger.summary(),
                 "run": job.credit_metrics() if job is not None else None}
 
-    def cmd_delete_category(self, category: str):
+    def cmd_delete_category(self, client: str, category: str):
         from .collector.exporter import write_category_file, write_master_summary
-        cats = self.state.all_categories()
+        state = self.stores.get(client)
+        cats = state.all_categories()
         if category not in cats:
             raise JobRejected(400, "unknown category")
-        if self.manager.category_busy(category):
+        if self.manager.category_busy(category, state):
             raise JobRejected(409, "A collection is running or queued for this "
                                    "category. Stop it first.")
         display = cats[category]["display"]
-        removed, is_custom, fname = self.state.delete_category(category)
-        self.state.save(config.STATE_PATH)
-        path = os.path.join(config.OUTPUT_DIR, fname)
+        removed, is_custom, fname = state.delete_category(category)
+        state.save(state.path)
+        path = os.path.join(state.out_dir, fname)
         try:
             if is_custom:
                 if os.path.exists(path):
                     os.remove(path)
             else:
-                write_category_file(display, fname, [], config.OUTPUT_DIR)
+                write_category_file(display, fname, [], state.out_dir)
         except OSError:
             pass  # e.g. the file is open in Excel; data is already deleted
-        cats = self.state.all_categories()
-        with self.state.lock:
-            records = {c: list(rs) for c, rs in self.state.records.items()}
-            stats = {c: dict(s) for c, s in self.state.stats.items()}
-        write_master_summary(cats, records, stats, config.OUTPUT_DIR)
+        cats = state.all_categories()
+        with state.lock:
+            records = {c: list(rs) for c, rs in state.records.items()}
+            stats = {c: dict(s) for c, s in state.stats.items()}
+        write_master_summary(cats, records, stats, state.out_dir)
         return {"ok": True, "removed": removed, "was_custom": is_custom,
                 "display": display}
 
-    def cmd_reset(self):
-        if self.manager.any_active():
-            raise JobRejected(409, "stop the running collections first")
-        fresh = StateStore()
-        old = self.state
-        # swap in place: jobs / manager keep their reference to self.state
-        with old.lock:
-            for attr in ("records", "stats", "custom", "registry", "done_queries",
-                         "search_cache", "discovery", "crawled", "jobs", "ledger"):
-                setattr(old, attr, getattr(fresh, attr))
-            for c in list(old.cat_rev) + list(old.records):
-                old.touch(c)
-        try:
-            os.remove(config.STATE_PATH)
-        except OSError:
-            pass
+    def cmd_reset(self, client: str):
+        """Wipe the caller's own data (records + dedup registry). Excel
+        files stay."""
+        if self.manager.any_active(self.stores.get(client)):
+            raise JobRejected(409, "stop your running collection first")
+        self.stores.replace(client)
         return {"ok": True}
 
     # -- lifecycle ----------------------------------------------------------------
@@ -300,7 +315,7 @@ class Worker:
         except Exception:
             log.exception("stopping jobs at shutdown")
         try:
-            self.state.flush()
+            self.stores.flush_all()
         except Exception:
             log.exception("final checkpoint at shutdown")
         self.pool.shutdown(wait=False, cancel_futures=True)

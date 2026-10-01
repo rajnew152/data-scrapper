@@ -126,8 +126,12 @@ duplicates removed / failed URLs, plus totals.
 
 ## 7. Checkpoint / resume
 
-State lives in `app/output/demo_state.json` (records, cross-category dedup
-registry, executed queries). One background writer saves it every ~5 s
+Every user (browser) has their own data: records, custom categories, dedup
+registry, executed queries and Excel files live in
+`app/output/users/<hash of the browser's client id>/` (`state.json` + the
+`.xlsx` files). One user never sees another user's records or files. Only
+raw Serper responses are shared (`app/output/search_cache.json`), so the
+same search is never paid for twice. A user's checkpoint is saved every ~5 s
 while collections run (however many run at once), and immediately when a
 collection ends, pauses or fails - a crash loses at most a few seconds of
 work. Starting a new collection for the same category resumes on top of
@@ -135,7 +139,8 @@ what is already collected; already-executed queries are skipped and known
 companies are treated as duplicates. If the collection worker process
 crashes, the web process restarts it within seconds and the collections
 that were running resume automatically.
-`POST /api/reset` (or deleting `demo_state.json`) starts fresh.
+`POST /api/reset` starts the caller's own data fresh. Data collected before
+per-user storage (`app/output/demo_state.json`) is no longer shown to anyone.
 
 ## 8. Testing without Serper credits
 

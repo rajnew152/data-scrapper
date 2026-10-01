@@ -120,8 +120,62 @@ class Timings:
 # Persistent state (checkpoint / resume)
 # --------------------------------------------------------------------------- #
 
-class StateStore:
+class SharedSearch:
+    """Serper response cache + in-flight request dedup shared by every
+    user's store: two users running the same search pay for it once. Only
+    raw search results are shared - records, dedup registry and crawl
+    memory stay per user."""
+
     def __init__(self):
+        self.cache: dict[str, dict] = {}
+        self.lock = threading.Lock()
+        self.sf_lock = threading.Lock()
+        self.inflight: dict[str, threading.Event] = {}
+        self._saved_sig = (0, 0.0)
+
+    def merge(self, cache: dict):
+        now = time.time()
+        with self.lock:
+            for k, v in cache.items():
+                if isinstance(v, dict) and now - v.get("ts", 0) < config.SEARCH_CACHE_TTL:
+                    self.cache.setdefault(k, v)
+
+    def load(self, path: str):
+        try:
+            with open(path, "rb") as fh:
+                self.merge(fastjson.loads(fh.read()))
+        except (OSError, ValueError):
+            pass
+        with self.lock:
+            self._saved_sig = self._sig()
+
+    def _sig(self):
+        return (len(self.cache), max((v.get("ts", 0) for v in self.cache.values()),
+                                     default=0.0))
+
+    def save(self, path: str):
+        """Write the cache if it changed since the last save (atomic)."""
+        with self.lock:
+            sig = self._sig()
+            if sig == self._saved_sig:
+                return
+            data = dict(self.cache)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(fastjson.dumps(data))
+        os.replace(tmp, path)
+        with self.lock:
+            self._saved_sig = sig
+
+
+class StateStore:
+    def __init__(self, path: str | None = None, out_dir: str | None = None):
+        # Checkpoint file + Excel folder. Default (None): the app-wide ones
+        # in config (read when used, so tests can repoint them); per-user
+        # stores get their own folder (see collector/stores.py).
+        self._path = path
+        self._out_dir = out_dir
         self.records: dict[str, list[dict]] = {c: [] for c in CATEGORIES}
         self.stats: dict[str, dict] = {
             c: {"discovered": 0, "duplicates": 0, "failed_urls": 0} for c in CATEGORIES}
@@ -132,6 +186,8 @@ class StateStore:
         # Persisted, so a re-run / resume / re-collect after delete NEVER
         # re-pays for a search it already made (within the TTL).
         self.search_cache: dict[str, dict] = {}
+        self.cache_lock = threading.Lock()
+        self.shares_cache = False        # True: cache persisted by its SharedSearch
         # Discovery planner memory per category: used query cells (canonical
         # keys) + measured phrase/location novelty, so a resumed run continues
         # with NEW searches instead of repeating or rephrasing old ones.
@@ -168,6 +224,31 @@ class StateStore:
         self._saver_path = ""
         self.saves = 0
         self.last_save_s = 0.0
+        self._closed = False
+
+    @property
+    def path(self) -> str:
+        return self._path or config.STATE_PATH
+
+    @property
+    def out_dir(self) -> str:
+        return self._out_dir or config.OUTPUT_DIR
+
+    def share(self, shared: SharedSearch):
+        """Use the cross-user search cache instead of a private one."""
+        if self.search_cache:
+            shared.merge(self.search_cache)
+        self.search_cache = shared.cache
+        self.cache_lock = shared.lock
+        self.sf_lock = shared.sf_lock
+        self.search_inflight = shared.inflight
+        self.shares_cache = True
+
+    def close(self):
+        """Unload: write a pending checkpoint and let the saver thread end."""
+        self._closed = True
+        self._saver_wake.set()
+        self.flush()
 
     # -- revisions / stats ------------------------------------------------------
     def touch(self, category: str):
@@ -233,6 +314,9 @@ class StateStore:
             with self.lock:
                 dirty, path = self._dirty, self._saver_path
                 self._dirty = False
+                if self._closed and not dirty and not self._dirty_exports:
+                    self._saver = None
+                    return
                 exports = set()
                 if time.time() - last_export >= config.EXPORT_MIN_INTERVAL:
                     exports, self._dirty_exports = self._dirty_exports, set()
@@ -262,7 +346,7 @@ class StateStore:
                           force: bool = False):
         """Regenerate the given categories' Excel files + the master summary
         (each skipped when its content is unchanged, unless force)."""
-        out_dir = out_dir or config.OUTPUT_DIR
+        out_dir = out_dir or self.out_dir
         cats = self.all_categories()
         with self.lock:
             records = {c: list(rs) for c, rs in self.records.items()}
@@ -274,7 +358,7 @@ class StateStore:
         write_master_summary(cats, records, stats, out_dir)
 
     def cache_get(self, key: str):
-        with self.lock:
+        with self.cache_lock:
             hit = self.search_cache.get(key)
             if hit and time.time() - hit.get("ts", 0) < config.SEARCH_CACHE_TTL:
                 return hit["result"]
@@ -290,7 +374,7 @@ class StateStore:
 
     def cache_put(self, key: str, result):
         result = [self._trim(r) for r in result]
-        with self.lock:
+        with self.cache_lock:
             if len(self.search_cache) >= config.SEARCH_CACHE_MAX:
                 oldest = sorted(self.search_cache.items(),
                                 key=lambda kv: kv[1].get("ts", 0))
@@ -376,6 +460,8 @@ class StateStore:
     def save(self, path: str, discovery_extra: dict | None = None):
         registry = self.registry.to_dict()
         ledger = self.ledger.to_dict()
+        with self.cache_lock:
+            search_cache = {} if self.shares_cache else dict(self.search_cache)
         with self.lock:   # shallow copies: json.dump runs outside the lock
             payload = {
                 "saved_at": datetime.now().isoformat(timespec="seconds"),
@@ -384,7 +470,7 @@ class StateStore:
                 "custom_categories": dict(self.custom),
                 "registry": registry,
                 "done_queries": sorted(self.done_queries),
-                "search_cache": dict(self.search_cache),
+                "search_cache": search_cache,
                 "discovery": dict(self.discovery) | (discovery_extra or {}),
                 "crawled": dict(self.crawled),
                 "jobs": {k: dict(v) for k, v in self.jobs.items()},
@@ -1439,9 +1525,9 @@ class CollectionJob:
                 if memory is not None:
                     self.state.discovery[self.category] = memory
             if not force:
-                self.state.request_save(config.STATE_PATH, export_category=self.category)
+                self.state.request_save(self.state.path, export_category=self.category)
                 return
-            self.state.save(config.STATE_PATH)
+            self.state.save(self.state.path)
             self.timings.add("export_state", time.perf_counter() - t0)
             t0 = time.perf_counter()
             self.state.export_categories([self.category])
@@ -1830,7 +1916,7 @@ class CollectionJob:
 
     def _excel_rows(self) -> int:
         from openpyxl import load_workbook
-        path = os.path.join(config.OUTPUT_DIR,
+        path = os.path.join(self.state.out_dir,
                             self.state.all_categories()[self.category]["file"])
         wb = load_workbook(path, read_only=True)
         try:
@@ -1868,7 +1954,7 @@ class CollectionJob:
             meta = self._job_meta()   # takes state.lock itself: build first
             with self.state.lock:
                 self.state.jobs[self.category] = meta
-            self.state.save(config.STATE_PATH)
+            self.state.save(self.state.path)
         except Exception:
             log.exception("could not save job metadata")
 
@@ -1983,7 +2069,7 @@ class CollectionJob:
                  f"{m['followup_pages']} further result pages fetched, "
                  f"{m['followup_pages_deferred']} deferred")
         try:
-            self.state.ledger.write_csv(os.path.join(config.OUTPUT_DIR,
+            self.state.ledger.write_csv(os.path.join(self.state.out_dir,
                                                      "credit_ledger.csv"))
         except OSError as exc:   # e.g. open in Excel: the ledger is in the checkpoint
             log.warning("credit ledger CSV not written: %s", exc)

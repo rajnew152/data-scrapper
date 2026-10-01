@@ -277,7 +277,6 @@ def drive(args):
     from backend.collector.engine import CollectionJob, StateStore
     from backend.worker import Worker
     import pickle
-    from types import SimpleNamespace
 
     state = StateStore.load(config.STATE_PATH)
     category = "Advisory"
@@ -315,13 +314,12 @@ def drive(args):
 
     def publisher():               # the worker's status bundle, same cadence
         last_rev = -1
-        view = SimpleNamespace(state=state)
         while not stop_pub.wait(config.STATUS_PUBLISH_INTERVAL):
             b = {"jobs": {job.id: job.snapshot(include_log=False)},
                  "logs": job.log_since(0)[1][-50:]}
             if state.rev != last_rev:
                 last_rev = state.rev
-                b["per_category"] = Worker.per_category(view)
+                b["per_category"] = Worker.per_category(state)
             pickle.dumps(b)
             bundles[0] += 1
 

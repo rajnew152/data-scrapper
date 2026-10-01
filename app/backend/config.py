@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # .../app
@@ -135,6 +136,19 @@ _load_dotenv()
 OUTPUT_DIR = os.path.abspath(os.environ.get("APP_OUTPUT_DIR", "").strip()
                              or os.path.join(APP_DIR, "output"))
 STATE_PATH = os.path.join(OUTPUT_DIR, "demo_state.json")
+
+
+def client_dir(client: str) -> str:
+    """Private data folder of one user (browser): their checkpoint, Excel
+    files and credit ledger. Every user sees only their own records. The
+    folder name is a hash, so client ids never appear on disk."""
+    h = hashlib.sha256(client.encode("utf-8")).hexdigest()[:32]
+    return os.path.join(OUTPUT_DIR, "users", h)
+
+
+# A user's data is unloaded from the worker's memory after this long without
+# a request or a running job (it is reloaded from disk on the next request).
+STORE_IDLE_S = 900
 
 
 # Parallel site fetches. Tune without code changes via SCRAPER_CONCURRENCY

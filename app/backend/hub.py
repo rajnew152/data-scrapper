@@ -26,6 +26,7 @@ from . import config
 log = logging.getLogger("hub")
 
 LOG_LINES = 300
+CLIENT_CACHE_MAX = 5000      # users whose category view is kept in memory
 
 
 class WorkerUnavailable(Exception):
@@ -76,8 +77,10 @@ class WorkerHub:
         self.ready = threading.Event()        # first bundle received
         self.epoch = ""
         # --- cached worker state (written by the reader thread only) ---------
-        self.per_category: dict = {}
-        self.cat_rev: dict[str, int] = {}
+        # Per user (client id): categories + counts and record revisions.
+        # Every user has their own data; nothing here is served to another.
+        self.client_cats: dict[str, dict] = {}
+        self.client_rev: dict[str, dict] = {}  # client -> {"ver", "gen", "cat"}
         self.jobs: dict[str, dict] = {}       # job id -> snapshot (incl. owner)
         self.logs: dict[str, JobLog] = {}
         self.by_client: dict[str, str] = {}   # client -> latest job id
@@ -221,9 +224,11 @@ class WorkerHub:
     def _apply_bundle(self, b: dict):
         if b.get("epoch") != self.epoch:        # a new worker instance
             self.epoch = b.get("epoch", "")
-        if "per_category" in b:
-            self.per_category = b["per_category"]
-        self.cat_rev = b.get("cat_rev", self.cat_rev)
+            # its stores restart their versions: re-fetch each user's view
+            self.client_cats.clear()
+            self.client_rev.clear()
+        for client, view in b.get("clients", {}).items():
+            self.set_client(client, view)
         for jid, snap in b.get("jobs", {}).items():
             self.remember_job(snap)
         for jid, lg in b.get("logs", {}).items():
@@ -247,6 +252,27 @@ class WorkerHub:
         self.worker_info = b.get("worker", {})
         self.last_bundle = time.time()
         self.ready.set()
+
+    def set_client(self, client: str, view: dict):
+        """Store one user's category view unless a newer one is cached."""
+        ver = tuple(view.get("ver") or (0, 0))
+        cur = self.client_rev.get(client)
+        if cur is not None and cur["ver"] > ver:
+            return
+        if client not in self.client_cats and len(self.client_cats) >= CLIENT_CACHE_MAX:
+            try:                    # oldest entry; re-fetched on its next use
+                old = next(iter(self.client_cats))
+            except (StopIteration, RuntimeError):   # changed by the other thread
+                old = None
+            self.client_cats.pop(old, None)
+            self.client_rev.pop(old, None)
+        self.client_cats[client] = view["per_category"]
+        self.client_rev[client] = {"ver": ver, "gen": ver[0],
+                                   "cat": view.get("cat_rev", {})}
+
+    def forget_client(self, client: str):
+        self.client_cats.pop(client, None)
+        self.client_rev.pop(client, None)
 
     def remember_job(self, snap: dict, log_lines: list[str] | None = None):
         """Store a snapshot (from a bundle or an RPC reply)."""

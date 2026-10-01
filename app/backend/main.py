@@ -303,10 +303,10 @@ class BlobCache:
             self.loading.pop(key, None)
 
 
-_records_cache = BlobCache(64)
+_records_cache = BlobCache(256)
 _files_cache = BlobCache(24)
 _static: dict[str, tuple[float, Blob]] = {}
-_files_listing: tuple[float, bytes] = (0.0, b"")
+_files_listing: "OrderedDict[str, tuple[float, bytes]]" = OrderedDict()  # per user
 
 
 class ServiceError(Exception):
@@ -325,7 +325,7 @@ def worker_error(exc: Exception) -> ServiceError:
 async def ensure_ready(timeout: float = 10.0):
     """Wait (briefly) for the first status bundle after startup. During a
     worker restart the last known state keeps being served."""
-    if hub.ready.is_set() or hub.per_category:
+    if hub.ready.is_set() or hub.last_bundle:
         return
     t_end = time.monotonic() + timeout
     while not hub.ready.is_set() and time.monotonic() < t_end:
@@ -333,6 +333,20 @@ async def ensure_ready(timeout: float = 10.0):
     if not hub.ready.is_set():
         raise ServiceError(503, "The collection service is starting - try again "
                                 "in a few seconds.")
+
+
+async def my_categories(client: str) -> dict:
+    """The caller's OWN categories with their counts. Every user has their
+    own data; one user's records are never counted or shown to another."""
+    cats = hub.client_cats.get(client)
+    if cats is None:
+        try:
+            view = await hub.call("categories", timeout=30, client=client)
+        except (RpcError, WorkerUnavailable) as exc:
+            raise worker_error(exc) from None
+        hub.set_client(client, view)
+        cats = hub.client_cats.get(client, view["per_category"])
+    return cats
 
 
 def public_job(snap: dict | None, jlog=None, log_after: int = 0) -> dict | None:
@@ -375,8 +389,9 @@ async def h_health(scope, headers, client) -> Reply:
 
 async def h_config(scope, headers, client) -> Reply:
     await ensure_ready()
+    cats = await my_categories(client)
     return jreply({
-        "categories": [{"slug": c, **d} for c, d in hub.per_category.items()],
+        "categories": [{"slug": c, **d} for c, d in cats.items()],
         "providers": ["serper"],
         "serper_key_present": bool(config.serper_api_key()),
         "defaults": {"target": config.DEFAULT_TARGET,
@@ -391,9 +406,11 @@ async def h_config(scope, headers, client) -> Reply:
 
 async def h_status(scope, headers, client) -> Reply:
     """The caller's own collection (with live-log lines after `log_after`
-    of job `log_job`), per-category counts and the shared queue. Served
-    from memory. Without log_after the whole log is returned (old pages)."""
+    of job `log_job`), the caller's own per-category counts and the shared
+    queue. Served from memory. Without log_after the whole log is returned
+    (old pages)."""
     await ensure_ready()
+    cats = await my_categories(client)
     q = _query(scope)
     log_after = _int(q.get("log_after"), 0)
     log_job = q.get("log_job", "")
@@ -404,7 +421,7 @@ async def h_status(scope, headers, client) -> Reply:
     active = job is not None and job.get("status") in ACTIVE
     return jreply({
         "job": job,
-        "per_category": hub.per_category,
+        "per_category": cats,
         "queue": hub.queue,
         "active_jobs": hub.active,
         "poll_ms": config.POLL_MS_ACTIVE if active else config.POLL_MS_IDLE,
@@ -417,35 +434,37 @@ async def h_records(scope, headers, client) -> Reply:
     category = q.get("category")
     if not category:
         return error_reply(422, "category is required")
-    if category not in hub.per_category:
+    if category not in await my_categories(client):
         return error_reply(400, "unknown category")
     limit = max(0, min(_int(q.get("limit"), 50), config.MAX_TARGET * 2))
-    rev = hub.cat_rev.get(category, 0)
-    key = (hub.epoch, category, limit)
+    cr = hub.client_rev.get(client) or {}
+    rev = (cr.get("gen", 0), cr.get("cat", {}).get(category, 0))
+    # the caller's own records only: the cache is keyed by client
+    key = (hub.epoch, client, category, limit)
     blob = _records_cache.get(key)
     if blob is None or blob.tag < rev:
         epoch = hub.epoch
 
         async def load():
             try:
-                data = await hub.call("records", timeout=30, category=category,
-                                      limit=limit)
+                data = await hub.call("records", timeout=30, client=client,
+                                      category=category, limit=limit)
             except (RpcError, WorkerUnavailable) as exc:
                 raise worker_error(exc) from None
-            r = data.pop("rev", rev)
-            return Blob(fastjson.dumps(data), f'"r-{epoch}-{category}-{r}-{limit}"',
-                        tag=r)
+            r = tuple(data.pop("rev", rev))
+            return Blob(fastjson.dumps(data),
+                        f'"r-{epoch}-{category}-{r[0]}.{r[1]}-{limit}"', tag=r)
         blob = await _records_cache.load(key, load)
     return blob.reply(headers, JSON_T)
 
 
-def _list_files() -> bytes:
+def _list_files(folder: str) -> bytes:
     out = []
-    if os.path.isdir(config.OUTPUT_DIR):
-        for name in sorted(os.listdir(config.OUTPUT_DIR)):
+    if os.path.isdir(folder):
+        for name in sorted(os.listdir(folder)):
             if name.endswith(".xlsx") and SAFE_FILE_RE.match(name) \
                     and ".tmp." not in name:
-                p = os.path.join(config.OUTPUT_DIR, name)
+                p = os.path.join(folder, name)
                 try:
                     st = os.stat(p)
                 except OSError:
@@ -455,11 +474,14 @@ def _list_files() -> bytes:
 
 
 async def h_files(scope, headers, client) -> Reply:
-    global _files_listing
-    t, body = _files_listing
+    """The caller's own Excel files."""
+    t, body = _files_listing.get(client, (0.0, b""))
     if time.monotonic() - t > 2.0:
-        body = await asyncio.to_thread(_list_files)
-        _files_listing = (time.monotonic(), body)
+        body = await asyncio.to_thread(_list_files, config.client_dir(client))
+        _files_listing[client] = (time.monotonic(), body)
+        _files_listing.move_to_end(client)
+        while len(_files_listing) > 1000:
+            _files_listing.popitem(last=False)
     return Reply(200, body)
 
 
@@ -740,15 +762,17 @@ async def credits(request: Request):
 
 @api.get("/api/download/{name}")
 async def download(name: str, request: Request):
-    known = {d["file"] for d in hub.per_category.values()} | {SUMMARY_FILE}
+    """One of the caller's own Excel files."""
+    client = client_of(request)
+    known = {d["file"] for d in (await my_categories(client)).values()} | {SUMMARY_FILE}
     if name not in known:
         raise HTTPException(404, "unknown file")
-    path = os.path.join(config.OUTPUT_DIR, name)
+    path = os.path.join(config.client_dir(client), name)
     try:
         st = await asyncio.to_thread(os.stat, path)
     except OSError:
         raise HTTPException(404, "file not generated yet") from None
-    key = (name, st.st_mtime_ns, st.st_size)
+    key = (path, st.st_mtime_ns, st.st_size)
     blob = _files_cache.get(key)
     if blob is None:
         # Served from memory: the file is open only for the moment it is read,
@@ -769,23 +793,30 @@ async def download(name: str, request: Request):
 
 
 @api.post("/api/category/delete")
-async def delete_category(req: DeleteCategoryRequest):
-    """Delete one category's collected data (and, for a custom category, the
-    category itself and its Excel file)."""
+async def delete_category(req: DeleteCategoryRequest, request: Request):
+    """Delete one of the caller's categories' collected data (and, for a
+    custom category, the category itself and its Excel file)."""
+    client = client_of(request)
     try:
-        data = await hub.call("delete_category", timeout=60, category=req.category)
+        data = await hub.call("delete_category", timeout=60, client=client,
+                              category=req.category)
     except (RpcError, WorkerUnavailable) as exc:
         raise worker_error(exc) from None
+    hub.forget_client(client)        # next poll fetches the fresh category list
+    _files_listing.pop(client, None)
     return jresponse(data)
 
 
 @api.post("/api/reset")
-async def reset():
-    """Wipe the checkpoint (records + dedup registry). Excel files stay."""
+async def reset(request: Request):
+    """Wipe the caller's own checkpoint (records + dedup registry). Excel
+    files stay."""
+    client = client_of(request)
     try:
-        data = await hub.call("reset", timeout=60)
+        data = await hub.call("reset", timeout=60, client=client)
     except (RpcError, WorkerUnavailable) as exc:
         raise worker_error(exc) from None
+    hub.forget_client(client)
     return jresponse(data)
 
 
